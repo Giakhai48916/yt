@@ -16,9 +16,9 @@ import java.io.ByteArrayInputStream
 /**
  * WebViewClient tích hợp:
  * 1. Chặn request mạng bằng AdBlockEngine
- * 2. Tiêm Scriptlet SSAI Defuser & PiP Controller
+ * 2. Tiêm Scriptlet SSAI Defuser & PiP Controller tại DOCUMENT_START
  * 3. Tiêm bộ luật CSS Cosmetic Filtering bằng textContent (Trusted Types CSP)
- * 4. Nhét mục "Cài đặt LiteTube" vào trong trang select_site (giữ nguyên trang gốc, không ghi đè)
+ * 4. Nhét mục "Cài đặt LiteTube" vào trong trang select_site (chỉ kích hoạt khi ở select_site, không chạy MutationObserver toàn trang)
  */
 open class AppWebViewClient(
     private val context: Context,
@@ -29,6 +29,7 @@ open class AppWebViewClient(
     var onPageFinishedCallback: ((url: String?) -> Unit)? = null
     var onInterceptWatchUrl: ((url: String) -> Boolean)? = null
 
+    private var documentStartInstalled = false
     private var pipControllerCode: String = ""
     private var scriptletCode: String = ""
     private var injectCssJs: String = ""
@@ -36,38 +37,36 @@ open class AppWebViewClient(
         (function() {
             try {
                 var styleId = '__brave_player_ui_style';
-                var css = [
-                    'html:not([data-brave-pip-mode]) ytm-mobile-topbar-renderer,',
-                    'html:not([data-brave-pip-mode]) ytm-header-bar,',
-                    'html:not([data-brave-pip-mode]) #header-bar,',
-                    'html:not([data-brave-pip-mode]) header.mobile-topbar-header,',
-                    'html:not([data-brave-pip-mode]) .mobile-topbar-header,',
-                    'html:not([data-brave-pip-mode]) .mobile-topbar-header-content {',
-                    '  display:none!important; visibility:hidden!important;',
-                    '  height:0!important; min-height:0!important; max-height:0!important;',
-                    '  margin:0!important; padding:0!important; border:0!important;',
-                    '  overflow:hidden!important; pointer-events:none!important;',
-                    '}',
-                    'html:not([data-brave-pip-mode]) #app,',
-                    'html:not([data-brave-pip-mode]) ytm-app,',
-                    'html:not([data-brave-pip-mode]) ytm-watch,',
-                    'html:not([data-brave-pip-mode]) .page-container,',
-                    'html:not([data-brave-pip-mode]) ytm-page-manager {',
-                    '  padding-top:0!important; margin-top:0!important;',
-                    '}',
-                    'html:not([data-brave-pip-mode]) #player-container-id,',
-                    'html:not([data-brave-pip-mode]) .player-container.sticky-player,',
-                    'html:not([data-brave-pip-mode]) .player-size {',
-                    '  top:0!important;',
-                    '}'
-                ].join('\n');
                 var style = document.getElementById(styleId);
                 if (!style) {
+                    var css = [
+                        'html:not([data-brave-pip-mode]) ytm-mobile-topbar-renderer,',
+                        'html:not([data-brave-pip-mode]) ytm-header-bar,',
+                        'html:not([data-brave-pip-mode]) #header-bar,',
+                        'html:not([data-brave-pip-mode]) header.mobile-topbar-header,',
+                        'html:not([data-brave-pip-mode]) .mobile-topbar-header,',
+                        'html:not([data-brave-pip-mode]) .mobile-topbar-header-content {',
+                        '  display:none!important; visibility:hidden!important;',
+                        '  height:0!important; min-height:0!important; max-height:0!important;',
+                        '  margin:0!important; padding:0!important; border:0!important;',
+                        '  overflow:hidden!important; pointer-events:none!important;',
+                        '}',
+                        'html:not([data-brave-pip-mode]) #app,',
+                        'html:not([data-brave-pip-mode]) ytm-app,',
+                        'html:not([data-brave-pip-mode]) ytm-watch,',
+                        'html:not([data-brave-pip-mode]) .page-container,',
+                        'html:not([data-brave-pip-mode]) ytm-page-manager {',
+                        '  padding-top:0!important; margin-top:0!important;',
+                        '}',
+                        'html:not([data-brave-pip-mode]) #player-container-id,',
+                        'html:not([data-brave-pip-mode]) .player-container.sticky-player,',
+                        'html:not([data-brave-pip-mode]) .player-size {',
+                        '  top:0!important;',
+                        '}'
+                    ].join('\n');
                     style = document.createElement('style');
                     style.id = styleId;
                     style.type = 'text/css';
-                    style.textContent = css;
-                } else if (style.textContent !== css) {
                     style.textContent = css;
                 }
                 var target = document.head || document.documentElement;
@@ -131,9 +130,9 @@ open class AppWebViewClient(
             function onDocClick(e) {
                 try {
                     var el = e.target;
-                    if (!el) return;
+                    if (!el || !el.closest) return;
 
-                    var anchor = el.closest ? el.closest('a') : null;
+                    var anchor = el.closest('a');
                     if (anchor && anchor.href && isWatchUrl(anchor.href)) {
                         e.preventDefault();
                         e.stopPropagation();
@@ -142,7 +141,7 @@ open class AppWebViewClient(
                         return false;
                     }
 
-                    var videoContainer = el.closest ? el.closest('ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-item-section-renderer, ytm-media-item') : null;
+                    var videoContainer = el.closest('ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-media-item');
                     if (videoContainer) {
                         var innerA = videoContainer.querySelector('a[href*="/watch"]');
                         if (innerA && innerA.href && isWatchUrl(innerA.href)) {
@@ -171,12 +170,16 @@ open class AppWebViewClient(
         })();
     """.trimIndent()
 
+    /**
+     * Tối ưu hóa: KHÔNG gắn MutationObserver({ subtree: true }) trên toàn bộ trang chủ/video!
+     * Chỉ kiểm tra nhẹ khi có sự kiện điều hướng hoặc khi URL thực sự chứa 'select_site'.
+     */
     private val selectSiteSettingsScriptletJs: String = """
         (function() {
             function injectSelectSiteItem() {
                 try {
-                    if (window.location.href.indexOf('select_site') === -1) return;
-                    if (document.getElementById('ytlite-select-site-item')) return;
+                    if (window.location.href.indexOf('select_site') === -1) return false;
+                    if (document.getElementById('ytlite-select-site-item')) return true;
 
                     var container = document.querySelector('ytm-settings-options, ytm-item-section-renderer, #contents, .item-section-renderer-contents, div[role="navigation"]');
                     if (!container) {
@@ -185,7 +188,7 @@ open class AppWebViewClient(
                             container = firstRow.parentNode;
                         }
                     }
-                    if (!container) return;
+                    if (!container) return false;
 
                     var row = document.createElement('div');
                     row.id = 'ytlite-select-site-item';
@@ -243,28 +246,31 @@ open class AppWebViewClient(
                     } else {
                         container.appendChild(row);
                     }
-                } catch(e) {}
+                    return true;
+                } catch(e) {
+                    return false;
+                }
+            }
+
+            function scheduleSelectSiteCheck() {
+                if (window.location.href.indexOf('select_site') === -1) return;
+                if (injectSelectSiteItem()) return;
+                var attempts = 0;
+                var timer = setInterval(function() {
+                    attempts++;
+                    if (injectSelectSiteItem() || attempts >= 12 || window.location.href.indexOf('select_site') === -1) {
+                        clearInterval(timer);
+                    }
+                }, 150);
             }
 
             if (!window.__ytLiteSelectSiteInjected) {
                 window.__ytLiteSelectSiteInjected = true;
-                if (window.MutationObserver) {
-                    var observer = new MutationObserver(function() {
-                        injectSelectSiteItem();
-                    });
-                    var startObs = function() {
-                        if (document.body) {
-                            observer.observe(document.body, { childList: true, subtree: true });
-                        }
-                    };
-                    if (document.readyState === 'loading') {
-                        document.addEventListener('DOMContentLoaded', startObs);
-                    } else {
-                        startObs();
-                    }
-                }
+                window.addEventListener('yt-navigate-finish', scheduleSelectSiteCheck);
+                window.addEventListener('popstate', scheduleSelectSiteCheck);
+                document.addEventListener('DOMContentLoaded', scheduleSelectSiteCheck);
             }
-            injectSelectSiteItem();
+            scheduleSelectSiteCheck();
         })();
     """.trimIndent()
 
@@ -286,7 +292,6 @@ open class AppWebViewClient(
 
             if (cosmeticCss.isNotEmpty()) {
                 val encodedCss = Base64.encodeToString(cosmeticCss.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                // Dùng textContent thay vì innerHTML để không bị chặn bởi TrustedHTML CSP trên m.youtube.com
                 injectCssJs = """
                     (function() {
                         try {
@@ -345,6 +350,7 @@ open class AppWebViewClient(
                 if (!isBrowseMode && injectPlayerUiCssJs.isNotEmpty()) {
                     WebViewCompat.addDocumentStartJavaScript(webView, injectPlayerUiCssJs, origins)
                 }
+                documentStartInstalled = true
             }
         } catch (e: Exception) {
             Log.e(tag, "Không thể đăng ký document-start script: ${e.message}")
@@ -377,7 +383,6 @@ open class AppWebViewClient(
         val url = request?.url.toString()
 
         if (AdBlockEngine.isBlocked(url)) {
-            Log.d(tag, "🛡️ [Blocked]: $url")
             return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
         }
 
@@ -391,22 +396,49 @@ open class AppWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        injectShields(view)
+        // Nếu thiết bị đã hỗ trợ DOCUMENT_START_SCRIPT thì không tiêm lặp lại ở onPageStarted
+        if (!documentStartInstalled) {
+            injectFullShields(view)
+        }
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
-        injectShields(view)
+        if (!documentStartInstalled) {
+            injectFullShields(view)
+        } else {
+            syncLightweightState(view, url)
+        }
         onPageFinishedCallback?.invoke(url)
     }
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
         super.doUpdateVisitedHistory(view, url, isReload)
-        // YouTube là SPA (chuyển trang không tải lại toàn bộ), tiêm lại để đảm bảo style & controller luôn sống
-        injectShields(view)
+        // Khi chuyển trang SPA trong YouTube, chỉ đồng bộ nhẹ CSS/Settings (không nạp lại hàng chục KB JS)
+        syncLightweightState(view, url)
     }
 
-    private fun injectShields(webView: WebView?) {
+    private fun syncLightweightState(webView: WebView?, url: String?) {
+        webView ?: return
+        val settingsJson = AppSettings.toJson(context)
+        val lightScript = buildString {
+            append("if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;")
+            if (!isBrowseMode) {
+                append(injectPlayerUiCssJs)
+            }
+            if (AdBlockEngine.isEnabled && injectCssJs.isNotEmpty()) {
+                append(injectCssJs)
+            } else if (!AdBlockEngine.isEnabled) {
+                append("(function(){var s=document.getElementById('__brave_cosmetic_style');if(s&&s.parentNode)s.parentNode.removeChild(s);})();")
+            }
+            if (url?.contains("select_site") == true) {
+                append(selectSiteSettingsScriptletJs)
+            }
+        }
+        webView.evaluateJavascript(lightScript, null)
+    }
+
+    private fun injectFullShields(webView: WebView?) {
         webView ?: return
 
         if (WebResourceCacheManager.isEnabled) {
@@ -427,22 +459,6 @@ open class AppWebViewClient(
         if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
             webView.evaluateJavascript(browseWatchInterceptorJs, null)
         }
-        // Đồng bộ cấu hình từ AppSettings xuống tầng JS
-        val settingsJson = AppSettings.toJson(context)
-        webView.evaluateJavascript(
-            "if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;",
-            null
-        )
-        if (!isBrowseMode && injectPlayerUiCssJs.isNotEmpty()) {
-            webView.evaluateJavascript(injectPlayerUiCssJs, null)
-        }
-        if (AdBlockEngine.isEnabled && injectCssJs.isNotEmpty()) {
-            webView.evaluateJavascript(injectCssJs, null)
-        } else if (!AdBlockEngine.isEnabled) {
-            webView.evaluateJavascript(
-                "(function(){var s=document.getElementById('__brave_cosmetic_style');if(s&&s.parentNode)s.parentNode.removeChild(s);})();",
-                null
-            )
-        }
+        syncLightweightState(webView, webView.url)
     }
 }

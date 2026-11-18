@@ -31,7 +31,6 @@ import android.view.animation.DecelerateInterpolator
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.FrameLayout
@@ -54,6 +53,7 @@ import com.brave.youtubelite.view.KeepAliveWebView
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
 
@@ -79,7 +79,7 @@ class MainActivity : AppCompatActivity() {
         HIDDEN, EXPANDED, COLLAPSED
     }
 
-    // Mã JS điều khiển PiP (assets/scriptlets/pip_controller.js), chèn trực tiếp khi cần
+    // Mã JS điều khiển PiP (assets/scriptlets/pip_controller.js), chỉ dùng fallback khi window.__bravePip chưa sẵn sàng
     private var pipControllerJs: String = ""
 
     // TẦNG DƯỚI: Browse WebView (Trang chủ, Kênh, Tìm kiếm, Đăng ký...)
@@ -116,7 +116,12 @@ class MainActivity : AppCompatActivity() {
     private var positionMs: Long = 0L
     private var durationMs: Long = -1L
     private var isMediaServiceActive = false
+    private var lastMediaServiceUpdateElapsedMs = 0L
+    private var lastMediaServicePlayingState: Boolean? = null
+    private var lastMediaServiceTitle: String = ""
+    private var lastMediaServiceVideoId: String = ""
 
+    private var isPlayerPrewarmed = false
     private var wasInPipMode = false
     private var isInPipLayout = false
     private var isHidingPipToAudio = false
@@ -167,7 +172,6 @@ class MainActivity : AppCompatActivity() {
             addAction(MediaService.ACTION_MEDIA_PREV)
             addAction(MediaService.ACTION_MEDIA_SEEK)
         }
-        // Dùng RECEIVER_EXPORTED để nhận PendingIntent từ SystemUI (PiP & Notification)
         ContextCompat.registerReceiver(
             this,
             mediaActionReceiver,
@@ -193,7 +197,12 @@ class MainActivity : AppCompatActivity() {
         setupBackPressedHandler()
 
         val targetUrl = intent?.dataString ?: "https://m.youtube.com"
-        webView.loadUrl(targetUrl)
+        if (targetUrl.contains("/watch") && !targetUrl.contains("/shorts/")) {
+            webView.loadUrl("https://m.youtube.com")
+            openVideoPlayer(targetUrl)
+        } else {
+            webView.loadUrl(targetUrl)
+        }
     }
 
     private fun initViews() {
@@ -269,10 +278,9 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(MediaBridge(fromPlayer = false), "AndroidBridge")
         val browseClient = AppWebViewClient(applicationContext, isBrowseMode = true).apply {
             onInterceptWatchUrl = { url ->
-                // Nếu bấm vào video thông thường (/watch?v=... trừ Shorts): Mở lớp phát đè lên!
                 if (url.contains("/watch") && !url.contains("/shorts/")) {
                     openVideoPlayer(url)
-                    true // Giữ nguyên trang chủ bên dưới!
+                    true
                 } else {
                     false
                 }
@@ -280,6 +288,8 @@ class MainActivity : AppCompatActivity() {
             onPageFinishedCallback = {
                 runOnUiThread {
                     swipeRefreshLayout.isRefreshing = false
+                    // Pre-warm nhẹ playerWebView sau khi trang chủ đã tải xong để lần bấm video đầu tiên mở tức thì
+                    prewarmPlayerWebViewIfNeeded()
                 }
             }
         }
@@ -300,6 +310,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView khi app đang rảnh
+     * để lần đầu người dùng bấm vào video không phải chờ tải ~4MB base.js từ đầu.
+     */
+    private fun prewarmPlayerWebViewIfNeeded() {
+        if (isPlayerPrewarmed) return
+        isPlayerPrewarmed = true
+        pipHandler.postDelayed({
+            if (panelState == PanelState.HIDDEN && playerWebView.url.isNullOrBlank()) {
+                playerWebView.onResume()
+                playerWebView.loadUrl("https://m.youtube.com")
+                // Sau khi nạp xong framework nền (4.5s), tạm dừng timers của playerWebView cho đến khi người dùng thực sự mở video
+                pipHandler.postDelayed({
+                    if (panelState == PanelState.HIDDEN) {
+                        playerWebView.onPause()
+                    }
+                }, 4500)
+            }
+        }, 1200)
+    }
+
+    /**
      * 2. Cấu hình Player WebView (Tầng trên): Chuyên dụng phát Video & xử lý PiP
      */
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
@@ -312,10 +343,17 @@ class MainActivity : AppCompatActivity() {
         playerWebView.webViewClient = playerClient
 
         playerWebView.webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                consoleMessage?.let {
-                    Log.d(WEB_LOG_TAG, "${it.message()} [${it.sourceId()}:${it.lineNumber()}]")
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (panelState != PanelState.EXPANDED) return
+                if (newProgress < 100) {
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.progress = newProgress
+                } else {
+                    progressBar.visibility = View.GONE
                 }
+            }
+
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                 return true
             }
 
@@ -334,12 +372,10 @@ class MainActivity : AppCompatActivity() {
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun setupPlayerGestures() {
-        // Nút mũi tên chúc xuống: Thu nhỏ player
         btnMinimizePlayer.setOnClickListener {
             collapsePlayer()
         }
 
-        // Kéo vuốt trên dải mép trên video để thu nhỏ (Swipe Down)
         var startY = 0f
         var isDragging = false
         playerDragArea.setOnTouchListener { _, event ->
@@ -371,7 +407,6 @@ class MainActivity : AppCompatActivity() {
                         isDragging = false
                         true
                     } else {
-                        // Click nhẹ vào vùng dải trên cùng: thu nhỏ player
                         collapsePlayer()
                         true
                     }
@@ -380,7 +415,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Chạm hoặc vuốt lên từ thanh MiniPlayer để bung to lại
         var miniStartY = 0f
         miniPlayerBar.setOnTouchListener { _, event ->
             if (panelState != PanelState.COLLAPSED) return@setOnTouchListener false
@@ -408,12 +442,10 @@ class MainActivity : AppCompatActivity() {
             expandPlayer()
         }
 
-        // Nút Play/Pause trên MiniPlayer Bar
         btnMiniPlayerPlayPause.setOnClickListener {
             runPipCommand("toggle")
         }
 
-        // Nút Đóng [X] trên MiniPlayer Bar
         btnMiniPlayerClose.setOnClickListener {
             closePlayer()
         }
@@ -421,12 +453,33 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Mở một video mới đè lên trang hiện tại:
-     * Tự động bung to lên toàn màn hình (EXPANDED), trang chủ bên dưới giữ nguyên vẹn 100%!
+     * - Bật lại playerWebView.onResume() và tạm nghỉ webView trang chủ (webView.onPause()) khi player che kín màn hình
+     *   để dồn 100% CPU/GPU cho việc giải mã và tải video.
+     * - Nếu playerWebView đã có sẵn framework YouTube (từ video trước hoặc từ bước pre-warm),
+     *   điều hướng SPA nội bộ (__braveOpenWatchSpa) giúp mở video mới gần như tức thì (< 0.3s) thay vì loadUrl lại từ đầu!
      */
     fun openVideoPlayer(url: String) {
         if (url.isEmpty()) return
         runOnUiThread {
+            isPlayerPrewarmed = true
+            val fullUrl = if (url.startsWith("http://") || url.startsWith("https://")) {
+                url
+            } else {
+                "https://m.youtube.com" + (if (url.startsWith("/")) "" else "/") + url
+            }
+            val newVid = extractVideoIdFromUrl(fullUrl)
+
+            // Nếu bấm lại đúng video đang phát ở MiniPlayer -> chỉ cần bung to lên ngay lập tức!
+            if (panelState != PanelState.HIDDEN && newVid.isNotEmpty() && newVid == currentVideoId) {
+                expandPlayer()
+                return@runOnUiThread
+            }
+
             panelState = PanelState.EXPANDED
+
+            // Đánh thức playerWebView và tạm nghỉ browse webView bên dưới để không tranh chấp CPU/GPU
+            playerWebView.onResume()
+            webView.onPause()
 
             val params = playerPanel.layoutParams as FrameLayout.LayoutParams
             params.height = ViewGroup.LayoutParams.MATCH_PARENT
@@ -442,13 +495,7 @@ class MainActivity : AppCompatActivity() {
             resetPlayerWebViewTransform()
             unlockPlayerWebViewSize()
 
-            // Reset thông tin MiniPlayer cho video mới
-            val fullUrl = if (url.startsWith("http://") || url.startsWith("https://")) {
-                url
-            } else {
-                "https://m.youtube.com" + (if (url.startsWith("/")) "" else "/") + url
-            }
-            currentVideoId = extractVideoIdFromUrl(fullUrl)
+            currentVideoId = newVid
             currentTitle = "LiteTube"
             currentChannel = ""
             positionMs = 0L
@@ -460,25 +507,36 @@ class MainActivity : AppCompatActivity() {
             btnMinimizePlayer.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
 
-            playerWebView.loadUrl(fullUrl)
+            val currentPlayerUrl = playerWebView.url ?: ""
+            if (currentPlayerUrl.contains("youtube.com")) {
+                val safeUrl = JSONObject.quote(fullUrl)
+                val safeVid = JSONObject.quote(newVid)
+                playerWebView.evaluateJavascript(
+                    "(function(){ return (window.__braveOpenWatchSpa && window.__braveOpenWatchSpa($safeUrl, $safeVid)) ? 'spa:ok' : 'spa:fallback'; })()"
+                ) { result ->
+                    if (result == null || !result.contains("spa:ok")) {
+                        playerWebView.loadUrl(fullUrl)
+                    }
+                }
+            } else {
+                playerWebView.loadUrl(fullUrl)
+            }
         }
     }
 
     /**
      * Thu nhỏ lớp xem video xuống thanh MiniPlayer ở đáy màn hình (COLLAPSED)
-     * Đặt MiniPlayer nằm ngay trên thanh Bottom Navigation Bar (Tablist cao 48dp) của YouTube
      */
     fun collapsePlayer() {
         if (panelState == PanelState.COLLAPSED || panelState == PanelState.HIDDEN) return
         panelState = PanelState.COLLAPSED
 
+        // Đánh thức lại Browse WebView để người dùng lướt trang chủ mượt mà
+        webView.onResume()
+
         val fullW = mainContainer.width
         val fullH = mainContainer.height
 
-        // QUAN TRỌNG: Khóa cứng kích thước playerWebView bằng toàn màn hình.
-        // Nếu để MATCH_PARENT, khi panel co về 64dp thì WebView cũng co theo → viewport web chỉ còn ~64px
-        // → YouTube tưởng đang ở popup nhỏ (tự bật CSS PiP, auto-pause bị chặn, lệch trạng thái nút Play/Pause)
-        // và video hiển thị sai kích thước.
         lockPlayerWebViewSize(fullW, fullH)
 
         miniPlayerBar.visibility = View.VISIBLE
@@ -486,14 +544,12 @@ class MainActivity : AppCompatActivity() {
         btnMinimizePlayer.visibility = View.GONE
         playerDragArea.visibility = View.GONE
 
-        // Đo vị trí thật của khung video trong trang để thu nhỏ chính xác vào ô 104x58dp
         playerWebView.evaluateJavascript(VIDEO_RECT_JS) { result ->
             if (panelState != PanelState.COLLAPSED) return@evaluateJavascript
             animateToMini(fullW, fullH, parseVideoRect(result))
         }
     }
 
-    /** Tính toán & chạy animation thu nhỏ khung video vào ô MiniPlayer. */
     private fun animateToMini(fullW: Int, fullH: Int, rect: FloatArray?) {
         val bottomNavH = dpToPx(bottomNavHeightDp)
         val miniH = dpToPx(64f)
@@ -502,13 +558,11 @@ class MainActivity : AppCompatActivity() {
         val boxLeft = dpToPx(4f)
         val targetY = (fullH - bottomNavH - miniH).coerceAtLeast(0f)
 
-        // Mặc định: player nằm sát đỉnh trang, rộng full màn hình, tỉ lệ 16:9
         var vLeft = 0f
         var vTop = 0f
         var vW = fullW.toFloat().coerceAtLeast(1f)
         var vH = vW * 9f / 16f
         if (rect != null) {
-            // rect = [left, top, width, height, innerWidth] theo CSS px → đổi sang pixel View
             val ratio = if (rect[4] > 0f) fullW / rect[4] else resources.displayMetrics.density
             vLeft = rect[0] * ratio
             vTop = rect[1] * ratio
@@ -522,12 +576,10 @@ class MainActivity : AppCompatActivity() {
 
         playerPanel.animate()
             .translationY(targetY)
-            .setDuration(260)
+            .setDuration(240)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
                 if (panelState != PanelState.COLLAPSED) return@withEndAction
-                // Thu gọn panel xuống 64dp ngay trên Bottom Navigation Bar (48dp) → tablist không bị che,
-                // trang chủ phía trên tự do nhận touch. WebView vẫn giữ kích thước full nên không bị relayout.
                 val params = playerPanel.layoutParams as FrameLayout.LayoutParams
                 params.height = miniH.toInt()
                 params.gravity = Gravity.BOTTOM
@@ -545,7 +597,7 @@ class MainActivity : AppCompatActivity() {
             .scaleY(scale)
             .translationX(tx)
             .translationY(ty)
-            .setDuration(260)
+            .setDuration(240)
             .setInterpolator(DecelerateInterpolator())
             .start()
     }
@@ -561,7 +613,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Giữ playerWebView ở kích thước cố định (full màn hình) khi panel bị co nhỏ. */
     private fun lockPlayerWebViewSize(w: Int, h: Int) {
         if (w <= 0 || h <= 0) return
         val lp = playerWebView.layoutParams as FrameLayout.LayoutParams
@@ -572,7 +623,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Trả playerWebView về MATCH_PARENT (dùng khi xem full / PiP / fullscreen). */
     private fun unlockPlayerWebViewSize() {
         val lp = playerWebView.layoutParams as FrameLayout.LayoutParams
         if (lp.width != ViewGroup.LayoutParams.MATCH_PARENT || lp.height != ViewGroup.LayoutParams.MATCH_PARENT) {
@@ -599,16 +649,17 @@ class MainActivity : AppCompatActivity() {
         if (panelState == PanelState.EXPANDED || panelState == PanelState.HIDDEN) return
         panelState = PanelState.EXPANDED
 
+        playerWebView.onResume()
+        webView.onPause()
+
         val fullW = mainContainer.width
         val fullH = mainContainer.height
         val bottomNavH = dpToPx(bottomNavHeightDp)
         val miniH = dpToPx(64f)
         val targetY = (fullH - bottomNavH - miniH).coerceAtLeast(0f)
 
-        // Giữ WebView full size trong lúc animate để không bị relayout giữa chừng
         lockPlayerWebViewSize(fullW, fullH)
 
-        // Phục hồi panel MATCH_PARENT nhưng bắt đầu từ vị trí miniplayer hiện tại
         playerPanel.animate().cancel()
         val params = playerPanel.layoutParams as FrameLayout.LayoutParams
         params.height = ViewGroup.LayoutParams.MATCH_PARENT
@@ -624,13 +675,11 @@ class MainActivity : AppCompatActivity() {
 
         playerPanel.animate()
             .translationY(0f)
-            .setDuration(260)
+            .setDuration(240)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
                 if (panelState != PanelState.EXPANDED) return@withEndAction
                 unlockPlayerWebViewSize()
-                // Đồng bộ lại trạng thái nội bộ của YouTube Player với thẻ <video> thật
-                // để nút Play/Pause của YouTube hoạt động ngay sau khi bung to
                 runPipCommand("resync")
             }
             .start()
@@ -642,17 +691,21 @@ class MainActivity : AppCompatActivity() {
             .scaleY(1f)
             .translationX(0f)
             .translationY(0f)
-            .setDuration(260)
+            .setDuration(240)
             .setInterpolator(DecelerateInterpolator())
             .start()
     }
 
     /**
-     * Tắt hẳn video player và ẩn lớp phát video
+     * Tắt video player và ẩn lớp phát video (NHƯNG giữ nguyên context YouTube SPA trong playerWebView
+     * để lần bấm video kế tiếp mở tức thì trong 0.2s thay vì phải nạp lại 4MB JS từ about:blank!)
      */
     fun closePlayer() {
         if (panelState == PanelState.HIDDEN) return
         panelState = PanelState.HIDDEN
+
+        webView.onResume()
+        runPipCommand("pause")
 
         val targetY = mainContainer.height.toFloat()
         playerPanel.animate().cancel()
@@ -672,7 +725,13 @@ class MainActivity : AppCompatActivity() {
                 resetPlayerWebViewTransform()
                 unlockPlayerWebViewSize()
 
-                playerWebView.loadUrl("about:blank")
+                // Dừng video và giải phóng bộ đệm giải mã nhưng giữ nguyên JS runtime của trang YouTube
+                playerWebView.evaluateJavascript(
+                    "(function(){try{if(window.__bravePip)window.__bravePip.pause();var v=document.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}catch(e){}})()",
+                    null
+                )
+                playerWebView.onPause()
+
                 currentVideoId = ""
                 positionMs = 0L
                 durationMs = -1L
@@ -747,20 +806,16 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
 
-                // 1. Nếu đang xem video toàn màn hình (EXPANDED) -> Thu nhỏ thành MiniPlayer
                 if (panelState == PanelState.EXPANDED) {
                     collapsePlayer()
                     return
                 }
 
-                // 2. Nếu MiniPlayer đang thu nhỏ ở đáy (COLLAPSED):
-                // Bấm Back sẽ đóng MiniPlayer ngay lập tức để người dùng tập trung lướt trang chủ
                 if (panelState == PanelState.COLLAPSED) {
                     closePlayer()
                     return
                 }
 
-                // 3. Nếu không có video player:
                 if (webView.canGoBack()) {
                     webView.goBack()
                 } else {
@@ -788,16 +843,21 @@ class MainActivity : AppCompatActivity() {
         val btnReloadInSettings = dialogView.findViewById<MaterialButton>(R.id.btnReloadInSettings)
         val btnCloseSettings = dialogView.findViewById<MaterialButton>(R.id.btnCloseSettings)
 
-        // Khởi tạo trạng thái Switch từ AppSettings
         switchAdBlock.isChecked = AppSettings.isAdBlockEnabled(this)
         switchBackgroundPlay.isChecked = AppSettings.isBackgroundPlayEnabled(this)
         switchAutoPip.isChecked = AppSettings.isAutoPipEnabled(this)
         switchPreloadCache.isChecked = AppSettings.isPreloadCacheEnabled(this)
 
         fun updateCacheDisplay() {
-            val totalBytes = WebResourceCacheManager.getCacheSizeBytes(this) + AppSettings.getCacheSizeBytes(this)
-            val mb = totalBytes.toDouble() / (1024.0 * 1024.0)
-            tvCacheSize.text = getString(R.string.setting_cache_size_format, mb)
+            Thread {
+                val totalBytes = WebResourceCacheManager.getCacheSizeBytes(this) + AppSettings.getCacheSizeBytes(this)
+                val mb = totalBytes.toDouble() / (1024.0 * 1024.0)
+                runOnUiThread {
+                    if (dialog.isShowing) {
+                        tvCacheSize.text = getString(R.string.setting_cache_size_format, mb)
+                    }
+                }
+            }.start()
         }
 
         updateCacheDisplay()
@@ -901,7 +961,6 @@ class MainActivity : AppCompatActivity() {
             builder.setAspectRatio(clampedPipAspectRatio())
         } catch (_: Exception) {}
 
-        // 1. Trái Play/Pause: Nút Tai nghe (ẩn popup, giữ âm thanh nền qua MediaService)
         val headphonesIntent = Intent(ACTION_PIP_HEADPHONES).setPackage(packageName)
         val headphonesPendingIntent = PendingIntent.getBroadcast(
             this,
@@ -916,7 +975,6 @@ class MainActivity : AppCompatActivity() {
             headphonesPendingIntent
         )
 
-        // 2. Giữa: Nút Play / Pause
         val iconRes = if (isVideoPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         val actionTitle = if (isVideoPlaying) "Tạm dừng" else "Phát"
         val actionIntent = Intent(if (isVideoPlaying) ACTION_PIP_PAUSE else ACTION_PIP_PLAY)
@@ -935,7 +993,6 @@ class MainActivity : AppCompatActivity() {
             playPausePendingIntent
         )
 
-        // 3. Phải Play/Pause: Nút Phát video tiếp theo
         val nextIntent = Intent(MediaService.ACTION_MEDIA_NEXT).setPackage(packageName)
         val nextPendingIntent = PendingIntent.getBroadcast(
             this,
@@ -975,19 +1032,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Chèn pip_controller.js rồi gọi window.__bravePip.<method>() trên target WebView.
+     * Gọi nhanh window.__bravePip.<method>() mà không phải gửi lại 20KB mã nguồn pip_controller.js mỗi lần.
+     * Chỉ chèn lại pipControllerJs nếu trang chưa có window.__bravePip.
      */
     private fun runPipCommand(method: String, onResult: ((String?) -> Unit)? = null) {
         val target = if (panelState != PanelState.HIDDEN) playerWebView else webView
-        val script = buildString {
-            append(pipControllerJs)
-            append("\n;(function(){try{")
-            append("return window.__bravePip ? String(window.__bravePip.$method()) : 'pip:missing';")
-            append("}catch(e){return 'pip:error:' + e;}})();")
-        }
-        target.evaluateJavascript(script) { result ->
-            Log.d(TAG, "PiP $method -> $result")
-            onResult?.invoke(result)
+        val fastScript = "(function(){try{return window.__bravePip ? String(window.__bravePip.$method()) : 'pip:missing';}catch(e){return 'pip:error:' + e;}})();"
+        target.evaluateJavascript(fastScript) { result ->
+            if (result != null && result.contains("pip:missing") && pipControllerJs.isNotEmpty()) {
+                val fallbackScript = buildString {
+                    append(pipControllerJs)
+                    append("\n;")
+                    append(fastScript)
+                }
+                target.evaluateJavascript(fallbackScript) { retryRes ->
+                    onResult?.invoke(retryRes)
+                }
+            } else {
+                onResult?.invoke(result)
+            }
         }
     }
 
@@ -998,11 +1061,8 @@ class MainActivity : AppCompatActivity() {
         progressBar.visibility = View.GONE
         swipeRefreshLayout.isEnabled = false
 
-        // Nếu đang ở MiniPlayer mà vào PiP: Phải đưa playerPanel về full screen và ẩn Browse view để PiP chụp đúng video!
         if (panelState == PanelState.COLLAPSED) {
             wasCollapsedBeforePip = true
-
-            // Tạm thời ẩn Browse View để cửa sổ PiP chỉ render duy nhất video của playerWebView
             swipeRefreshLayout.visibility = View.GONE
 
             val params = playerPanel.layoutParams as FrameLayout.LayoutParams
@@ -1018,7 +1078,6 @@ class MainActivity : AppCompatActivity() {
             btnMinimizePlayer.visibility = View.GONE
             playerDragArea.visibility = View.GONE
 
-            // WebView phải co giãn theo cửa sổ PiP → trả về MATCH_PARENT
             resetPlayerWebViewTransform()
             unlockPlayerWebViewSize()
         }
@@ -1030,11 +1089,10 @@ class MainActivity : AppCompatActivity() {
         )
         runPipCommand("enter")
 
-        // Luôn bật Media Player (notification + thumbnail) ngay cả khi đang ở chế độ popup PiP
         if (!isMediaServiceActive && (isVideoPlaying || panelState != PanelState.HIDDEN)) {
             startMediaService()
         } else if (isMediaServiceActive) {
-            updateMediaService()
+            updateMediaService(force = true)
         }
     }
 
@@ -1046,8 +1104,6 @@ class MainActivity : AppCompatActivity() {
         }
         runPipCommand("exit")
 
-        // Nếu trước khi vào PiP người dùng đang ở MiniPlayer → chờ cửa sổ bung lại full kích thước
-        // rồi mới thu nhỏ về MiniPlayer (nếu thu ngay, kích thước mainContainer vẫn còn là kích thước PiP)
         if (wasCollapsedBeforePip) {
             wasCollapsedBeforePip = false
             panelState = PanelState.EXPANDED
@@ -1060,10 +1116,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Nút Tai nghe (trái Play/Pause trong PiP):
-     * Ẩn cửa sổ video popup nhưng vẫn giữ âm thanh & Media Player chạy nền.
-     */
     private fun handlePipHeadphones() {
         isHidingPipToAudio = true
         hidingPipToAudioAtMs = SystemClock.elapsedRealtime()
@@ -1097,10 +1149,6 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
-    /**
-     * Khi người dùng bấm dấu [X] (hoặc kéo đóng) cửa sổ PiP:
-     * Tạm dừng hẳn video và tắt hoàn toàn MediaService / Notification.
-     */
     private fun dismissPipAndStopMedia() {
         cancelPendingPipEnterCallbacks()
         pipHandler.removeCallbacks(pendingCollapseRunnable)
@@ -1151,14 +1199,14 @@ class MainActivity : AppCompatActivity() {
         isVideoPlaying = true
         updatePipParams()
         runPipCommand("play")
-        updateMediaService(isPlaying = true)
+        updateMediaService(isPlaying = true, force = true)
     }
 
     private fun handlePipPause() {
         isVideoPlaying = false
         updatePipParams()
         runPipCommand("pause")
-        updateMediaService(isPlaying = false)
+        updateMediaService(isPlaying = false, force = true)
     }
 
     override fun onUserLeaveHint() {
@@ -1200,10 +1248,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             cancelPendingPipEnterCallbacks()
             if (isHidingPipToAudio && (SystemClock.elapsedRealtime() - hidingPipToAudioAtMs) < 8000L) {
-                // Đang chuyển từ PiP sang chỉ nghe âm thanh nền qua nút Tai nghe
                 exitPipLayout(restoreMiniIfCollapsed = false)
             } else if (lifecycle.currentState == Lifecycle.State.CREATED) {
-                // Người dùng bấm nút [X] đóng cửa sổ PiP -> dừng video + tắt Media Player
                 wasInPipMode = false
                 dismissPipAndStopMedia()
             } else {
@@ -1230,6 +1276,15 @@ class MainActivity : AppCompatActivity() {
             if (!isFullscreen) {
                 swipeRefreshLayout.isEnabled = true
             }
+            if (panelState == PanelState.EXPANDED) {
+                playerWebView.onResume()
+                webView.onPause()
+            } else {
+                webView.onResume()
+                if (panelState == PanelState.COLLAPSED) {
+                    playerWebView.onResume()
+                }
+            }
             runPipCommand("setBackground(false)")
             stopMediaService()
         }
@@ -1250,7 +1305,6 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         if (isInPipModeCompat()) {
-            // Tắt màn hình khi đang ở cửa sổ PiP -> giữ phát nền nếu bật Background Play
             runPipCommand("setBackground(true)")
             if (isVideoPlaying && AppSettings.isBackgroundPlayEnabled(this)) {
                 startMediaService()
@@ -1261,12 +1315,10 @@ class MainActivity : AppCompatActivity() {
         if (wasInPipMode) {
             wasInPipMode = false
             if (isHidingPipToAudio && (SystemClock.elapsedRealtime() - hidingPipToAudioAtMs) < 8000L) {
-                // Thoát PiP bằng nút Tai nghe -> giữ âm thanh chạy nền + Media Player notification
                 isHidingPipToAudio = false
                 runPipCommand("setBackground(true)")
                 startMediaService()
             } else {
-                // Thoát PiP bằng nút [X] (onPictureInPictureModeChanged(false) -> onStop) -> tắt video & media
                 isHidingPipToAudio = false
                 dismissPipAndStopMedia()
             }
@@ -1274,9 +1326,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         runPipCommand("setBackground(true)")
-        val bgPlay = AppSettings.isBackgroundPlayEnabled(this)
-        if (isVideoPlaying && bgPlay) {
+        val bgPlay = AppSettings.isAutoPipEnabled(this) || AppSettings.isBackgroundPlayEnabled(this)
+        if (isVideoPlaying && AppSettings.isBackgroundPlayEnabled(this)) {
             startMediaService()
+        } else if (!bgPlay) {
+            webView.onPause()
+            playerWebView.onPause()
         }
     }
 
@@ -1304,28 +1359,48 @@ class MainActivity : AppCompatActivity() {
                 startService(intent)
             }
             isMediaServiceActive = true
+            lastMediaServiceUpdateElapsedMs = SystemClock.elapsedRealtime()
+            lastMediaServicePlayingState = isVideoPlaying
+            lastMediaServiceTitle = currentTitle
+            lastMediaServiceVideoId = vid
         } catch (_: Exception) {}
     }
 
-    private fun updateMediaService(isPlaying: Boolean? = null) {
+    private fun updateMediaService(isPlaying: Boolean? = null, force: Boolean = false) {
         if (!isMediaServiceActive) return
+        val targetPlaying = isPlaying ?: isVideoPlaying
+        val vid = resolvedVideoId()
+        val now = SystemClock.elapsedRealtime()
+
+        // Chống spam startService(ACTION_UPDATE) mỗi giây nếu trạng thái Play/Pause, VideoId, Title không đổi
+        val stateChanged = targetPlaying != lastMediaServicePlayingState ||
+            currentTitle != lastMediaServiceTitle ||
+            vid != lastMediaServiceVideoId
+        if (!force && !stateChanged && (now - lastMediaServiceUpdateElapsedMs) < 5000L) {
+            return
+        }
+
         try {
-            val vid = resolvedVideoId()
             if (vid.isNotEmpty()) currentVideoId = vid
             val intent = Intent(this, MediaService::class.java).apply {
                 action = MediaService.ACTION_UPDATE
                 putExtra(MediaService.EXTRA_TITLE, currentTitle)
                 putExtra(MediaService.EXTRA_CHANNEL, currentChannel)
-                putExtra(MediaService.EXTRA_IS_PLAYING, isPlaying ?: isVideoPlaying)
+                putExtra(MediaService.EXTRA_IS_PLAYING, targetPlaying)
                 putExtra(MediaService.EXTRA_POSITION_MS, positionMs)
                 putExtra(MediaService.EXTRA_DURATION_MS, durationMs)
                 putExtra(MediaService.EXTRA_VIDEO_ID, vid)
             }
             startService(intent)
+            lastMediaServiceUpdateElapsedMs = now
+            lastMediaServicePlayingState = targetPlaying
+            lastMediaServiceTitle = currentTitle
+            lastMediaServiceVideoId = vid
         } catch (_: Exception) {}
     }
 
     private fun stopMediaService() {
+        if (!isMediaServiceActive) return
         try {
             val intent = Intent(this, MediaService::class.java).apply {
                 action = MediaService.ACTION_STOP
@@ -1347,10 +1422,6 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    /**
-     * Cập nhật trạng thái phát + MiniPlayer Bar. Chỉ set lại View khi giá trị thực sự thay đổi
-     * để tránh nhấp nháy giao diện.
-     */
     private fun applyMediaState(
         playing: Boolean,
         title: String,
@@ -1386,8 +1457,8 @@ class MainActivity : AppCompatActivity() {
         if (playingChanged) updatePipParams()
         if (!isMediaServiceActive && isInPipModeCompat() && (playing || panelState != PanelState.HIDDEN)) {
             startMediaService()
-        } else {
-            updateMediaService()
+        } else if (isMediaServiceActive) {
+            updateMediaService(force = playingChanged)
         }
     }
 
@@ -1408,13 +1479,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        /**
-         * Chỉ nhận trạng thái media từ đúng WebView đang phát:
-         * - Khi lớp Player đang mở (EXPANDED/COLLAPSED): chỉ nhận từ playerWebView
-         * - Khi lớp Player ẩn: chỉ nhận từ webView (Browse, ví dụ Shorts)
-         * Tránh việc trang chủ liên tục báo "paused" + tiêu đề trang chủ đè lên video đang phát
-         * (nguyên nhân tên video nhảy lung tung và icon play/pause nhấp nháy trên MiniPlayer).
-         */
         private fun acceptMedia(): Boolean =
             if (panelState != PanelState.HIDDEN) fromPlayer else !fromPlayer
 

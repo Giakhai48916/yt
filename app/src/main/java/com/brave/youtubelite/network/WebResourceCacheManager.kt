@@ -13,10 +13,19 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.zip.GZIPInputStream
 
 /**
  * Quản lý Preload / Warmup và Lưu đệm tài nguyên tĩnh (Static Asset Cache) đa tầng
- * (Memory LRU + Disk Cache) cho YouTube Lite, giúp tránh tải lại các bundle JS/CSS/Font nặng.
+ * (Memory LRU + Disk Cache) cho YouTube Lite.
+ *
+ * CẢI TIẾN HIỆU NĂNG CHỐNG DELAY / NGHẼN MẠNG:
+ * - Tuyệt đối KHÔNG tải mạng đồng bộ (blocking HttpURLConnection) bên trong shouldInterceptRequest!
+ *   Khi cache miss: trả về null ngay lập tức (0ms) để nhân Chromium tự tải bằng HTTP/2, HTTP/3 (QUIC)
+ *   và giải nén Brotli gốc, đồng thời đẩy tác vụ nạp cache xuống background thread không chặn UI/Video.
+ * - Hỗ trợ nén GZIP khi nạp cache nền để giảm 70-80% dung lượng tải.
  */
 object WebResourceCacheManager {
     private const val TAG = "WebResourceCache"
@@ -25,13 +34,17 @@ object WebResourceCacheManager {
     var isEnabled: Boolean = true
 
     // Giới hạn dung lượng bộ nhớ
-    private const val MAX_MEMORY_CACHE_BYTES = 12 * 1024 * 1024 // 12MB RAM
+    private const val MAX_MEMORY_CACHE_BYTES = 16 * 1024 * 1024 // 16MB RAM
     private const val MAX_DISK_CACHE_BYTES = 50L * 1024 * 1024  // 50MB Disk
     private const val TARGET_DISK_CACHE_BYTES = 40L * 1024 * 1024 // 40MB khi dọn dẹp
     private const val MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024     // Tối đa 4MB / file
     private const val CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000   // 7 ngày
 
     private const val CACHE_DIR_NAME = "yt_static_cache"
+
+    private val bgExecutor = Executors.newFixedThreadPool(2)
+    private val inFlightKeys = ConcurrentHashMap.newKeySet<String>()
+    private val knownMissingOnDisk = ConcurrentHashMap.newKeySet<String>()
 
     // Bộ nhớ đệm Memory LRU
     data class CachedResource(
@@ -103,7 +116,7 @@ object WebResourceCacheManager {
     )
 
     /**
-     * Khởi tạo bộ đệm đĩa và kích hoạt warmup DNS trong nền
+     * Khởi tạo bộ đệm đĩa, nạp trước các asset nóng vào RAM và kích hoạt warmup DNS trong nền
      */
     fun init(context: Context) {
         if (appContext == null) {
@@ -115,11 +128,36 @@ object WebResourceCacheManager {
             }
             diskCacheDir = dir
             warmupConnections(app)
-            Thread {
+            bgExecutor.execute {
                 trimDiskCache()
-            }.start()
+                preloadHotDiskAssetsToMemory()
+            }
             Log.d(TAG, "Đã khởi tạo WebResourceCacheManager (Dir: ${dir.absolutePath})")
         }
+    }
+
+    /**
+     * Nạp sẵn các tài nguyên tĩnh trên đĩa vào RAM ngay khi mở app để tránh đọc đĩa trên luồng mạng WebView
+     */
+    private fun preloadHotDiskAssetsToMemory() {
+        val dir = diskCacheDir ?: return
+        try {
+            val files = dir.listFiles() ?: return
+            val binFiles = files.filter { it.name.endsWith(".bin") }
+                .sortedByDescending { it.lastModified() }
+            var loadedBytes = 0
+            for (bin in binFiles) {
+                if (loadedBytes + bin.length() > MAX_MEMORY_CACHE_BYTES * 3 / 4) break
+                val key = bin.name.substringBeforeLast(".bin")
+                if (memoryCache.get(key) == null) {
+                    val res = readFromDisk(key)
+                    if (res != null) {
+                        memoryCache.put(key, res)
+                        loadedBytes += res.data.size
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     /**
@@ -133,13 +171,14 @@ object WebResourceCacheManager {
      * Phân giải DNS trước cho các domain thiết yếu của YouTube để triệt tiêu độ trễ DNS lần đầu
      */
     fun warmupConnections(context: Context) {
-        Thread {
+        bgExecutor.execute {
             val domains = listOf(
                 "m.youtube.com",
                 "i.ytimg.com",
                 "s.ytimg.com",
                 "yt3.ggpht.com",
-                "fonts.gstatic.com"
+                "fonts.gstatic.com",
+                "googlevideo.com"
             )
             for (domain in domains) {
                 try {
@@ -148,49 +187,38 @@ object WebResourceCacheManager {
                     // Lỗi phân giải DNS bỏ qua an toàn
                 }
             }
-        }.start()
+        }
     }
 
     /**
      * Kiểm tra URL và WebResourceRequest có phải là tài nguyên tĩnh bất biến cần cache hay không
      */
     fun isCacheableStaticAsset(url: String, request: WebResourceRequest? = null): Boolean {
-        if (!isEnabled) return false
-        if (url.isBlank()) return false
+        if (!isEnabled || url.isBlank()) return false
         if (request != null) {
-            // Chỉ cache phương thức GET
-            val method = request.method
-            if (!method.equals("GET", ignoreCase = true)) return false
-
-            // KHÔNG cache document HTML chính
+            if (!request.method.equals("GET", ignoreCase = true)) return false
             if (request.isForMainFrame) return false
+        }
+
+        // Fast-path: Loại trừ ngay các luồng video và API động bằng kiểm tra chuỗi nhanh trước khi gọi Uri.parse
+        if (url.contains("googlevideo.com") ||
+            url.contains("/videoplayback") ||
+            url.contains("/youtubei/v1/") ||
+            url.contains("/api/") ||
+            url.contains("/ptracking") ||
+            url.contains("/generate_204")
+        ) {
+            return false
         }
 
         return try {
             val uri = Uri.parse(url)
             val host = uri.host?.lowercase() ?: return false
-            val path = uri.path?.lowercase() ?: ""
-
-            // KHÔNG cache luồng video/audio
-            if (host.contains("googlevideo.com") || path.contains("/videoplayback")) {
-                return false
-            }
-
-            // KHÔNG cache API động
-            if (path.contains("/youtubei/v1/") ||
-                path.contains("/api/") ||
-                path.contains("/ptracking") ||
-                path.contains("/generate_204")
-            ) {
-                return false
-            }
-
-            // CHỈ cache các tài nguyên tĩnh bất biến của YouTube & Google
             if (!ALLOWED_HOSTS.contains(host)) {
                 return false
             }
 
-            // Khớp một trong các mẫu tài nguyên tĩnh cốt lõi
+            val path = uri.path?.lowercase() ?: ""
             val matchesPattern = STATIC_PATH_PATTERNS.any { path.contains(it) }
             val matchesExtension = STATIC_EXTENSIONS.any { path.endsWith(it) }
 
@@ -227,8 +255,9 @@ object WebResourceCacheManager {
 
     /**
      * Đánh chặn request mạng từ WebView:
-     * - Nếu có trong Memory hoặc Disk Cache -> Trả về WebResourceResponse ngay lập tức.
-     * - Nếu chưa có -> Tải qua HttpURLConnection, lưu vào Cache rồi trả về.
+     * - Nếu có trong Memory hoặc Disk Cache -> Trả về WebResourceResponse ngay lập tức (0ms).
+     * - Nếu chưa có -> Trả về null NGAY LẬP TỨC để Chromium tự tải bằng mạng gốc siêu tốc (HTTP/3 + Brotli),
+     *   đồng thời nạp vào bộ đệm trong background thread cho các lần mở sau.
      */
     fun intercept(request: WebResourceRequest?): WebResourceResponse? {
         if (!isEnabled || request == null) return null
@@ -240,39 +269,62 @@ object WebResourceCacheManager {
 
         val key = getCacheKey(url)
 
-        // 1. Kiểm tra Memory Cache
+        // 1. Kiểm tra Memory Cache (O(1) RAM lookup)
         val memoryCached = memoryCache.get(key)
         if (memoryCached != null) {
             return createWebResourceResponse(memoryCached)
         }
 
-        // 2. Kiểm tra Disk Cache
-        val diskCached = readFromDisk(key)
-        if (diskCached != null) {
-            memoryCache.put(key, diskCached)
-            return createWebResourceResponse(diskCached)
+        // 2. Kiểm tra Disk Cache (nếu chưa bị đánh dấu là không có trên đĩa)
+        if (!knownMissingOnDisk.contains(key)) {
+            val diskCached = readFromDisk(key)
+            if (diskCached != null) {
+                memoryCache.put(key, diskCached)
+                return createWebResourceResponse(diskCached)
+            } else {
+                knownMissingOnDisk.add(key)
+            }
         }
 
-        // 3. Tải từ mạng và nạp vào bộ đệm
-        return fetchAndCache(url, request, key)
+        // 3. Cache Miss: KHÔNG chặn luồng của WebView!
+        // Đẩy việc lưu cache xuống luồng nền và trả về null để Chromium tự tải ngay lập tức.
+        val headersSnapshot = request.requestHeaders?.toMap() ?: emptyMap()
+        scheduleBackgroundFetch(url, headersSnapshot, key)
+        return null
     }
 
-    private fun fetchAndCache(
+    private fun scheduleBackgroundFetch(
         url: String,
-        request: WebResourceRequest,
+        requestHeaders: Map<String, String>,
         key: String
-    ): WebResourceResponse? {
+    ) {
+        if (!inFlightKeys.add(key)) return
+        bgExecutor.execute {
+            try {
+                fetchAndCacheBackground(url, requestHeaders, key)
+            } finally {
+                inFlightKeys.remove(key)
+            }
+        }
+    }
+
+    private fun fetchAndCacheBackground(
+        url: String,
+        requestHeaders: Map<String, String>,
+        key: String
+    ) {
         var connection: HttpURLConnection? = null
         try {
             val conn = URL(url).openConnection() as HttpURLConnection
             connection = conn
             conn.requestMethod = "GET"
-            conn.connectTimeout = 5000
-            conn.readTimeout = 8000
+            conn.connectTimeout = 4000
+            conn.readTimeout = 6000
             conn.instanceFollowRedirects = true
 
-            // Kế thừa các header cần thiết từ request WebView (User-Agent, v.v.)
-            request.requestHeaders?.forEach { (headerKey, headerValue) ->
+            // Cho phép nén GZIP để tải các bundle JS/CSS nhanh gấp 4-5 lần
+            conn.setRequestProperty("Accept-Encoding", "gzip")
+            requestHeaders.forEach { (headerKey, headerValue) ->
                 if (!headerKey.equals("Host", ignoreCase = true) &&
                     !headerKey.equals("Content-Length", ignoreCase = true) &&
                     !headerKey.equals("Accept-Encoding", ignoreCase = true)
@@ -281,12 +333,19 @@ object WebResourceCacheManager {
                 }
             }
 
-            val responseCode = conn.responseCode
-            if (responseCode == HttpURLConnection.HTTP_OK) {
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 val rawContentType = conn.contentType
                 val (mimeType, encoding) = parseContentType(rawContentType, url)
+                val contentEncoding = conn.contentEncoding?.lowercase() ?: ""
 
-                val bytes = conn.inputStream.use { it.readBytes() }
+                val rawStream = conn.inputStream
+                val decodedStream = if (contentEncoding.contains("gzip")) {
+                    GZIPInputStream(rawStream)
+                } else {
+                    rawStream
+                }
+
+                val bytes = decodedStream.use { it.readBytes() }
                 if (bytes.isNotEmpty() && bytes.size <= MAX_FILE_SIZE_BYTES) {
                     val cached = CachedResource(
                         mimeType = mimeType,
@@ -295,17 +354,16 @@ object WebResourceCacheManager {
                     )
                     memoryCache.put(key, cached)
                     saveToDisk(key, cached)
-                    return createWebResourceResponse(cached)
+                    knownMissingOnDisk.remove(key)
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Lỗi nạp tài nguyên tĩnh ($url): ${e.message}")
+            Log.w(TAG, "Lỗi nạp tài nguyên tĩnh nền ($url): ${e.message}")
         } finally {
             try {
                 connection?.disconnect()
             } catch (_: Exception) {}
         }
-        return null
     }
 
     private fun createWebResourceResponse(cached: CachedResource): WebResourceResponse {
@@ -350,9 +408,6 @@ object WebResourceCacheManager {
             val encoding = metaJson.optString("encoding").ifEmpty { null }
             val bytes = binFile.readBytes()
 
-            // Cập nhật timestamp sửa đổi để phục vụ cơ chế LRU đĩa
-            binFile.setLastModified(now)
-
             return CachedResource(
                 mimeType = mimeType,
                 encoding = encoding,
@@ -385,10 +440,6 @@ object WebResourceCacheManager {
 
             tempBin.renameTo(finalBin)
             tempMeta.renameTo(finalMeta)
-
-            if (getCacheSizeBytesInternal(dir) > MAX_DISK_CACHE_BYTES) {
-                trimDiskCache()
-            }
         } catch (e: Exception) {
             Log.w(TAG, "Lỗi ghi disk cache ($key): ${e.message}")
         }
@@ -466,6 +517,7 @@ object WebResourceCacheManager {
     fun clearCache(context: Context) {
         try {
             memoryCache.evictAll()
+            knownMissingOnDisk.clear()
             val dir = diskCacheDir ?: File(context.applicationContext.cacheDir, CACHE_DIR_NAME)
             if (dir.exists()) {
                 dir.listFiles()?.forEach { it.delete() }
