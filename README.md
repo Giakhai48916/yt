@@ -57,7 +57,7 @@ Thay vì phải gánh một ứng dụng chính thức cồng kềnh, và ngập
 ## 📥 Tải Về & Cài Đặt (Installation)
 
 ### Cách 1: Tải Bản Đóng Gói Sẵn (Khuyên dùng)
-1. Truy cập mục [**Releases**](https://github.com/Kaziike/yt-wa/releases) hoặc tab [**Actions**](https://github.com/Kaziike/yt-wa/actions) của kho lưu trữ này.
+1. Truy cập mục [**Actions**](https://github.com/Giakhai48916/yt/actions) của kho lưu trữ này.
 2. Tải về file `.apk` mới nhất từ mục **Artifacts** (ví dụ: `YouTubeLite-Debug-APK`).
 3. Mở file `.apk` trên điện thoại Android của bạn và chọn **Cài đặt** (Nếu có thông báo, cho phép cài đặt ứng dụng từ nguồn này).
 4. Mở **LiteTube** và tận hưởng trải nghiệm xem video không giới hạn!
