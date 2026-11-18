@@ -16,9 +16,10 @@ import java.io.ByteArrayInputStream
 /**
  * WebViewClient tích hợp:
  * 1. Chặn request mạng bằng AdBlockEngine
- * 2. Tiêm Scriptlet SSAI Defuser & PiP Controller
+ * 2. Tiêm Scriptlet SSAI Defuser & PiP Controller tại DOCUMENT_START
  * 3. Tiêm bộ luật CSS Cosmetic Filtering bằng textContent (Trusted Types CSP)
- * 4. Nhét mục "Cài đặt LiteTube" vào trong trang select_site (giữ nguyên trang gốc, không ghi đè)
+ * 4. Chặn triệt để phát tự động (Inline Muted Autoplay Preview) trên Browse WebView để không bao giờ
+ *    bị chồng 2 âm thanh hoặc gây nghẽn decoder phần cứng khi bấm mở video / vào Shorts lần đầu!
  */
 open class AppWebViewClient(
     private val context: Context,
@@ -29,6 +30,7 @@ open class AppWebViewClient(
     var onPageFinishedCallback: ((url: String?) -> Unit)? = null
     var onInterceptWatchUrl: ((url: String) -> Boolean)? = null
 
+    private var documentStartInstalled = false
     private var pipControllerCode: String = ""
     private var scriptletCode: String = ""
     private var injectCssJs: String = ""
@@ -36,38 +38,36 @@ open class AppWebViewClient(
         (function() {
             try {
                 var styleId = '__brave_player_ui_style';
-                var css = [
-                    'html:not([data-brave-pip-mode]) ytm-mobile-topbar-renderer,',
-                    'html:not([data-brave-pip-mode]) ytm-header-bar,',
-                    'html:not([data-brave-pip-mode]) #header-bar,',
-                    'html:not([data-brave-pip-mode]) header.mobile-topbar-header,',
-                    'html:not([data-brave-pip-mode]) .mobile-topbar-header,',
-                    'html:not([data-brave-pip-mode]) .mobile-topbar-header-content {',
-                    '  display:none!important; visibility:hidden!important;',
-                    '  height:0!important; min-height:0!important; max-height:0!important;',
-                    '  margin:0!important; padding:0!important; border:0!important;',
-                    '  overflow:hidden!important; pointer-events:none!important;',
-                    '}',
-                    'html:not([data-brave-pip-mode]) #app,',
-                    'html:not([data-brave-pip-mode]) ytm-app,',
-                    'html:not([data-brave-pip-mode]) ytm-watch,',
-                    'html:not([data-brave-pip-mode]) .page-container,',
-                    'html:not([data-brave-pip-mode]) ytm-page-manager {',
-                    '  padding-top:0!important; margin-top:0!important;',
-                    '}',
-                    'html:not([data-brave-pip-mode]) #player-container-id,',
-                    'html:not([data-brave-pip-mode]) .player-container.sticky-player,',
-                    'html:not([data-brave-pip-mode]) .player-size {',
-                    '  top:0!important;',
-                    '}'
-                ].join('\n');
                 var style = document.getElementById(styleId);
                 if (!style) {
+                    var css = [
+                        'html:not([data-brave-pip-mode]) ytm-mobile-topbar-renderer,',
+                        'html:not([data-brave-pip-mode]) ytm-header-bar,',
+                        'html:not([data-brave-pip-mode]) #header-bar,',
+                        'html:not([data-brave-pip-mode]) header.mobile-topbar-header,',
+                        'html:not([data-brave-pip-mode]) .mobile-topbar-header,',
+                        'html:not([data-brave-pip-mode]) .mobile-topbar-header-content {',
+                        '  display:none!important; visibility:hidden!important;',
+                        '  height:0!important; min-height:0!important; max-height:0!important;',
+                        '  margin:0!important; padding:0!important; border:0!important;',
+                        '  overflow:hidden!important; pointer-events:none!important;',
+                        '}',
+                        'html:not([data-brave-pip-mode]) #app,',
+                        'html:not([data-brave-pip-mode]) ytm-app,',
+                        'html:not([data-brave-pip-mode]) ytm-watch,',
+                        'html:not([data-brave-pip-mode]) .page-container,',
+                        'html:not([data-brave-pip-mode]) ytm-page-manager {',
+                        '  padding-top:0!important; margin-top:0!important;',
+                        '}',
+                        'html:not([data-brave-pip-mode]) #player-container-id,',
+                        'html:not([data-brave-pip-mode]) .player-container.sticky-player,',
+                        'html:not([data-brave-pip-mode]) .player-size {',
+                        '  top:0!important;',
+                        '}'
+                    ].join('\n');
                     style = document.createElement('style');
                     style.id = styleId;
                     style.type = 'text/css';
-                    style.textContent = css;
-                } else if (style.textContent !== css) {
                     style.textContent = css;
                 }
                 var target = document.head || document.documentElement;
@@ -78,14 +78,46 @@ open class AppWebViewClient(
         })();
     """.trimIndent()
 
+    /**
+     * Scriptlet dành riêng cho Browse WebView (Tầng 1):
+     * - Chặn mọi điều hướng /watch?v=... trên Browse WebView và chuyển sang Player Layer (Tầng 2).
+     * - KHÓA CHẶT việc phát video/âm thanh trên trang chủ (inline preview hoặc leak sang /watch)
+     *   để tuyệt đối không bao giờ xảy ra lỗi 2 luồng âm thanh phát chồng lên nhau!
+     * - Chỉ cho phép Browse WebView phát video khi người dùng đang ở tab `/shorts/`.
+     * - Khi người dùng vào `/shorts/`, tự động báo lên Native tạm dừng MiniPlayer (nếu đang mở)
+     *   để Shorts khởi chạy mượt ngay lập tức mà không bị nghẽn decoder hay chồng tiếng.
+     */
     private val browseWatchInterceptorJs: String = """
         (function() {
             if (window.__braveWatchInterceptorInstalled) return;
             window.__braveWatchInterceptorInstalled = true;
+            window.__braveIsBrowseWebView = true;
+
+            var lastDispatchedUrl = '';
+            var lastDispatchedTime = 0;
 
             function isWatchUrl(url) {
                 if (!url || typeof url !== 'string') return false;
                 return url.indexOf('/watch') !== -1 && url.indexOf('/shorts/') === -1;
+            }
+
+            function isShortsActive() {
+                var p = window.location.pathname || '';
+                return p.indexOf('/shorts') !== -1;
+            }
+
+            function stopAllBrowseVideos() {
+                try {
+                    var vids = document.querySelectorAll('video');
+                    for (var i = 0; i < vids.length; i++) {
+                        var v = vids[i];
+                        if (!v.paused) {
+                            window.__braveAllowPauseUntil = Date.now() + 1000;
+                            (window.__braveNativePause || v.pause).call(v);
+                        }
+                        v.muted = true;
+                    }
+                } catch(e) {}
             }
 
             function dispatchWatchUrl(url) {
@@ -96,6 +128,13 @@ open class AppWebViewClient(
                     fullUrl = origin + (fullUrl.indexOf('/') === 0 ? '' : '/') + fullUrl;
                 }
                 if (isWatchUrl(fullUrl)) {
+                    stopAllBrowseVideos();
+                    var now = Date.now();
+                    if (fullUrl === lastDispatchedUrl && (now - lastDispatchedTime) < 600) {
+                        return true;
+                    }
+                    lastDispatchedUrl = fullUrl;
+                    lastDispatchedTime = now;
                     if (window.AndroidBridge && typeof window.AndroidBridge.openWatchLayer === 'function') {
                         window.AndroidBridge.openWatchLayer(fullUrl);
                         return true;
@@ -104,13 +143,41 @@ open class AppWebViewClient(
                 return false;
             }
 
-            // 1. Hook history.pushState & replaceState (Lưới an toàn bắt SPA Router của YouTube)
+            // 1. Ngăn chặn tuyệt đối video tự phát (Inline Preview / Leak) trên Trang chủ / Tìm kiếm của Browse WebView!
+            // Chỉ khi người dùng bấm vào tab Shorts (/shorts/) thì mới cho phép thẻ <video> trong Browse WebView phát.
+            document.addEventListener('play', function(e) {
+                var v = e.target;
+                if (!v || v.tagName !== 'VIDEO') return;
+                if (!isShortsActive()) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try {
+                        window.__braveAllowPauseUntil = Date.now() + 1000;
+                        v.muted = true;
+                        (window.__braveNativePause || v.pause).call(v);
+                    } catch(err) {}
+                } else {
+                    // Đang phát Shorts -> báo cho Native tạm dừng Player Layer (nếu có) để tránh chồng 2 tiếng & giải phóng decoder!
+                    if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                        try { window.AndroidBridge.onShortsStarted(); } catch(err2) {}
+                    }
+                }
+            }, true);
+
+            // 2. Hook history.pushState & replaceState (Chặn SPA Router của YouTube)
             try {
                 var origPushState = history.pushState;
                 history.pushState = function(state, title, url) {
-                    if (url && isWatchUrl(String(url))) {
-                        if (dispatchWatchUrl(String(url))) {
-                            return; // Ngăn browse webview chuyển sang URL watch
+                    if (url) {
+                        var sUrl = String(url);
+                        if (isWatchUrl(sUrl)) {
+                            if (dispatchWatchUrl(sUrl)) {
+                                return; // Ngăn browse webview chuyển sang URL watch
+                            }
+                        } else if (sUrl.indexOf('/shorts') !== -1) {
+                            if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                                try { window.AndroidBridge.onShortsStarted(); } catch(eS) {}
+                            }
                         }
                     }
                     return origPushState.apply(history, arguments);
@@ -118,22 +185,43 @@ open class AppWebViewClient(
 
                 var origReplaceState = history.replaceState;
                 history.replaceState = function(state, title, url) {
-                    if (url && isWatchUrl(String(url))) {
-                        if (dispatchWatchUrl(String(url))) {
-                            return;
+                    if (url) {
+                        var sUrl = String(url);
+                        if (isWatchUrl(sUrl)) {
+                            if (dispatchWatchUrl(sUrl)) {
+                                return;
+                            }
+                        } else if (sUrl.indexOf('/shorts') !== -1) {
+                            if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                                try { window.AndroidBridge.onShortsStarted(); } catch(eS2) {}
+                            }
                         }
                     }
                     return origReplaceState.apply(history, arguments);
                 };
             } catch(e) {}
 
-            // 2. Bắt sự kiện click ở Capture Phase (useCapture = true) đón đầu mọi touch/click
+            // 3. Bắt sự kiện click ở Capture Phase (useCapture = true) đón đầu mọi touch/click
             function onDocClick(e) {
                 try {
                     var el = e.target;
-                    if (!el) return;
+                    if (!el || !el.closest) return;
 
-                    var anchor = el.closest ? el.closest('a') : null;
+                    // Không chặn nếu người dùng bấm vào nút menu 3 chấm của video
+                    if (el.closest('ytm-menu, .media-item-menu, button[aria-label*="Action" i], button[aria-label*="Thao tác" i], button[aria-label*="More" i], button[aria-label*="Thêm" i]')) {
+                        return;
+                    }
+
+                    // Nếu bấm vào tab Shorts ở thanh đáy -> báo ngay cho Native dọn tài nguyên trước để Shorts vào cực nhanh!
+                    var pivotTab = el.closest('ytm-pivot-bar-item-renderer, [role="tab"]');
+                    if (pivotTab && pivotTab.textContent && pivotTab.textContent.toLowerCase().indexOf('shorts') !== -1) {
+                        if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                            try { window.AndroidBridge.onShortsStarted(); } catch(eTab) {}
+                        }
+                        return;
+                    }
+
+                    var anchor = el.closest('a');
                     if (anchor && anchor.href && isWatchUrl(anchor.href)) {
                         e.preventDefault();
                         e.stopPropagation();
@@ -142,7 +230,7 @@ open class AppWebViewClient(
                         return false;
                     }
 
-                    var videoContainer = el.closest ? el.closest('ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-item-section-renderer, ytm-media-item') : null;
+                    var videoContainer = el.closest('ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-media-item, ytm-playlist-panel-video-renderer');
                     if (videoContainer) {
                         var innerA = videoContainer.querySelector('a[href*="/watch"]');
                         if (innerA && innerA.href && isWatchUrl(innerA.href)) {
@@ -158,13 +246,19 @@ open class AppWebViewClient(
 
             document.addEventListener('click', onDocClick, true);
 
-            // 3. Lắng nghe yt-navigate Polymer event
+            // 4. Lắng nghe yt-navigate Polymer event
             window.addEventListener('yt-navigate', function(e) {
                 try {
-                    if (e && e.detail && e.detail.url && isWatchUrl(e.detail.url)) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        dispatchWatchUrl(e.detail.url);
+                    if (e && e.detail && e.detail.url) {
+                        if (isWatchUrl(e.detail.url)) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            dispatchWatchUrl(e.detail.url);
+                        } else if (String(e.detail.url).indexOf('/shorts') !== -1) {
+                            if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                                try { window.AndroidBridge.onShortsStarted(); } catch(eNav) {}
+                            }
+                        }
                     }
                 } catch(err) {}
             }, true);
@@ -175,8 +269,8 @@ open class AppWebViewClient(
         (function() {
             function injectSelectSiteItem() {
                 try {
-                    if (window.location.href.indexOf('select_site') === -1) return;
-                    if (document.getElementById('ytlite-select-site-item')) return;
+                    if (window.location.href.indexOf('select_site') === -1) return false;
+                    if (document.getElementById('ytlite-select-site-item')) return true;
 
                     var container = document.querySelector('ytm-settings-options, ytm-item-section-renderer, #contents, .item-section-renderer-contents, div[role="navigation"]');
                     if (!container) {
@@ -185,7 +279,7 @@ open class AppWebViewClient(
                             container = firstRow.parentNode;
                         }
                     }
-                    if (!container) return;
+                    if (!container) return false;
 
                     var row = document.createElement('div');
                     row.id = 'ytlite-select-site-item';
@@ -212,7 +306,7 @@ open class AppWebViewClient(
 
                     var subtitle = document.createElement('div');
                     subtitle.style.cssText = 'font-size:12px;color:#aaa;line-height:16px;margin-top:2px;';
-                    subtitle.textContent = 'Chặn quảng cáo, phát nền, popup, cache...';
+                    subtitle.textContent = 'Hẹn giờ tắt video, chặn quảng cáo, phát nền...';
 
                     content.appendChild(title);
                     content.appendChild(subtitle);
@@ -243,28 +337,31 @@ open class AppWebViewClient(
                     } else {
                         container.appendChild(row);
                     }
-                } catch(e) {}
+                    return true;
+                } catch(e) {
+                    return false;
+                }
+            }
+
+            function scheduleSelectSiteCheck() {
+                if (window.location.href.indexOf('select_site') === -1) return;
+                if (injectSelectSiteItem()) return;
+                var attempts = 0;
+                var timer = setInterval(function() {
+                    attempts++;
+                    if (injectSelectSiteItem() || attempts >= 12 || window.location.href.indexOf('select_site') === -1) {
+                        clearInterval(timer);
+                    }
+                }, 150);
             }
 
             if (!window.__ytLiteSelectSiteInjected) {
                 window.__ytLiteSelectSiteInjected = true;
-                if (window.MutationObserver) {
-                    var observer = new MutationObserver(function() {
-                        injectSelectSiteItem();
-                    });
-                    var startObs = function() {
-                        if (document.body) {
-                            observer.observe(document.body, { childList: true, subtree: true });
-                        }
-                    };
-                    if (document.readyState === 'loading') {
-                        document.addEventListener('DOMContentLoaded', startObs);
-                    } else {
-                        startObs();
-                    }
-                }
+                window.addEventListener('yt-navigate-finish', scheduleSelectSiteCheck);
+                window.addEventListener('popstate', scheduleSelectSiteCheck);
+                document.addEventListener('DOMContentLoaded', scheduleSelectSiteCheck);
             }
-            injectSelectSiteItem();
+            scheduleSelectSiteCheck();
         })();
     """.trimIndent()
 
@@ -286,7 +383,6 @@ open class AppWebViewClient(
 
             if (cosmeticCss.isNotEmpty()) {
                 val encodedCss = Base64.encodeToString(cosmeticCss.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                // Dùng textContent thay vì innerHTML để không bị chặn bởi TrustedHTML CSP trên m.youtube.com
                 injectCssJs = """
                     (function() {
                         try {
@@ -314,13 +410,14 @@ open class AppWebViewClient(
         }
     }
 
-    /**
-     * Đăng ký scriptlet chạy ở thời điểm document-start (trước mọi script của YouTube).
-     */
     fun installDocumentStartScripts(webView: WebView) {
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 val origins = setOf("*")
+                // Quan trọng: Chạy browseWatchInterceptorJs TRƯỚC youtube_defuser.js để gắn cờ __braveIsBrowseWebView
+                if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
+                    WebViewCompat.addDocumentStartJavaScript(webView, browseWatchInterceptorJs, origins)
+                }
                 if (WebResourceCacheManager.isEnabled) {
                     val preloadScript = WebResourceCacheManager.getPreloadScript()
                     if (preloadScript.isNotEmpty()) {
@@ -339,12 +436,10 @@ open class AppWebViewClient(
                 if (selectSiteSettingsScriptletJs.isNotEmpty()) {
                     WebViewCompat.addDocumentStartJavaScript(webView, selectSiteSettingsScriptletJs, origins)
                 }
-                if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
-                    WebViewCompat.addDocumentStartJavaScript(webView, browseWatchInterceptorJs, origins)
-                }
                 if (!isBrowseMode && injectPlayerUiCssJs.isNotEmpty()) {
                     WebViewCompat.addDocumentStartJavaScript(webView, injectPlayerUiCssJs, origins)
                 }
+                documentStartInstalled = true
             }
         } catch (e: Exception) {
             Log.e(tag, "Không thể đăng ký document-start script: ${e.message}")
@@ -377,7 +472,6 @@ open class AppWebViewClient(
         val url = request?.url.toString()
 
         if (AdBlockEngine.isBlocked(url)) {
-            Log.d(tag, "🛡️ [Blocked]: $url")
             return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
         }
 
@@ -391,24 +485,63 @@ open class AppWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        injectShields(view)
+        if (!documentStartInstalled) {
+            injectFullShields(view)
+        }
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
-        injectShields(view)
+        if (!documentStartInstalled) {
+            injectFullShields(view)
+        } else {
+            syncLightweightState(view, url)
+        }
         onPageFinishedCallback?.invoke(url)
     }
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
         super.doUpdateVisitedHistory(view, url, isReload)
-        // YouTube là SPA (chuyển trang không tải lại toàn bộ), tiêm lại để đảm bảo style & controller luôn sống
-        injectShields(view)
+        // Nếu Browse WebView vô tình lọt sang URL /watch (do YouTube SPA), chặn ngay và chuyển lên Player Layer!
+        if (isBrowseMode && url != null && url.contains("/watch") && !url.contains("/shorts/")) {
+            view?.evaluateJavascript(
+                "(function(){try{var vids=document.querySelectorAll('video');for(var i=0;i<vids.length;i++){vids[i].muted=true;(window.__braveNativePause||vids[i].pause).call(vids[i]);}if(history.length>1)history.back();}catch(e){}})()",
+                null
+            )
+            onInterceptWatchUrl?.invoke(url)
+            return
+        }
+        syncLightweightState(view, url)
     }
 
-    private fun injectShields(webView: WebView?) {
+    private fun syncLightweightState(webView: WebView?, url: String?) {
+        webView ?: return
+        val settingsJson = AppSettings.toJson(context)
+        val sleepLabel = org.json.JSONObject.quote(AppSettings.getSleepTimerLabel())
+        val lightScript = buildString {
+            append("window.__braveSleepTimerLabel = $sleepLabel;")
+            append("if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;")
+            if (!isBrowseMode) {
+                append(injectPlayerUiCssJs)
+            }
+            if (AdBlockEngine.isEnabled && injectCssJs.isNotEmpty()) {
+                append(injectCssJs)
+            } else if (!AdBlockEngine.isEnabled) {
+                append("(function(){var s=document.getElementById('__brave_cosmetic_style');if(s&&s.parentNode)s.parentNode.removeChild(s);})();")
+            }
+            if (url?.contains("select_site") == true) {
+                append(selectSiteSettingsScriptletJs)
+            }
+        }
+        webView.evaluateJavascript(lightScript, null)
+    }
+
+    private fun injectFullShields(webView: WebView?) {
         webView ?: return
 
+        if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
+            webView.evaluateJavascript(browseWatchInterceptorJs, null)
+        }
         if (WebResourceCacheManager.isEnabled) {
             val preloadScript = WebResourceCacheManager.getPreloadScript()
             if (preloadScript.isNotEmpty()) {
@@ -424,25 +557,6 @@ open class AppWebViewClient(
         if (selectSiteSettingsScriptletJs.isNotEmpty()) {
             webView.evaluateJavascript(selectSiteSettingsScriptletJs, null)
         }
-        if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
-            webView.evaluateJavascript(browseWatchInterceptorJs, null)
-        }
-        // Đồng bộ cấu hình từ AppSettings xuống tầng JS
-        val settingsJson = AppSettings.toJson(context)
-        webView.evaluateJavascript(
-            "if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;",
-            null
-        )
-        if (!isBrowseMode && injectPlayerUiCssJs.isNotEmpty()) {
-            webView.evaluateJavascript(injectPlayerUiCssJs, null)
-        }
-        if (AdBlockEngine.isEnabled && injectCssJs.isNotEmpty()) {
-            webView.evaluateJavascript(injectCssJs, null)
-        } else if (!AdBlockEngine.isEnabled) {
-            webView.evaluateJavascript(
-                "(function(){var s=document.getElementById('__brave_cosmetic_style');if(s&&s.parentNode)s.parentNode.removeChild(s);})();",
-                null
-            )
-        }
+        syncLightweightState(webView, webView.url)
     }
 }
