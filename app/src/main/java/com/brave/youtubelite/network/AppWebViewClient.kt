@@ -18,7 +18,8 @@ import java.io.ByteArrayInputStream
  * 1. Chặn request mạng bằng AdBlockEngine
  * 2. Tiêm Scriptlet SSAI Defuser & PiP Controller tại DOCUMENT_START
  * 3. Tiêm bộ luật CSS Cosmetic Filtering bằng textContent (Trusted Types CSP)
- * 4. Nhét mục "Cài đặt LiteTube" vào trong trang select_site (chỉ kích hoạt khi ở select_site, không chạy MutationObserver toàn trang)
+ * 4. Tích hợp mục "Hẹn giờ tắt video" ngay trong menu bánh răng (⚙) trên trình phát YouTube
+ *    và mục "Cài đặt LiteTube" trong trang select_site.
  */
 open class AppWebViewClient(
     private val context: Context,
@@ -82,6 +83,9 @@ open class AppWebViewClient(
             if (window.__braveWatchInterceptorInstalled) return;
             window.__braveWatchInterceptorInstalled = true;
 
+            var lastDispatchedUrl = '';
+            var lastDispatchedTime = 0;
+
             function isWatchUrl(url) {
                 if (!url || typeof url !== 'string') return false;
                 return url.indexOf('/watch') !== -1 && url.indexOf('/shorts/') === -1;
@@ -95,6 +99,12 @@ open class AppWebViewClient(
                     fullUrl = origin + (fullUrl.indexOf('/') === 0 ? '' : '/') + fullUrl;
                 }
                 if (isWatchUrl(fullUrl)) {
+                    var now = Date.now();
+                    if (fullUrl === lastDispatchedUrl && (now - lastDispatchedTime) < 600) {
+                        return true;
+                    }
+                    lastDispatchedUrl = fullUrl;
+                    lastDispatchedTime = now;
                     if (window.AndroidBridge && typeof window.AndroidBridge.openWatchLayer === 'function') {
                         window.AndroidBridge.openWatchLayer(fullUrl);
                         return true;
@@ -170,10 +180,6 @@ open class AppWebViewClient(
         })();
     """.trimIndent()
 
-    /**
-     * Tối ưu hóa: KHÔNG gắn MutationObserver({ subtree: true }) trên toàn bộ trang chủ/video!
-     * Chỉ kiểm tra nhẹ khi có sự kiện điều hướng hoặc khi URL thực sự chứa 'select_site'.
-     */
     private val selectSiteSettingsScriptletJs: String = """
         (function() {
             function injectSelectSiteItem() {
@@ -215,7 +221,7 @@ open class AppWebViewClient(
 
                     var subtitle = document.createElement('div');
                     subtitle.style.cssText = 'font-size:12px;color:#aaa;line-height:16px;margin-top:2px;';
-                    subtitle.textContent = 'Chặn quảng cáo, phát nền, popup, cache...';
+                    subtitle.textContent = 'Hẹn giờ tắt video, chặn quảng cáo, phát nền...';
 
                     content.appendChild(title);
                     content.appendChild(subtitle);
@@ -319,9 +325,6 @@ open class AppWebViewClient(
         }
     }
 
-    /**
-     * Đăng ký scriptlet chạy ở thời điểm document-start (trước mọi script của YouTube).
-     */
     fun installDocumentStartScripts(webView: WebView) {
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -396,7 +399,6 @@ open class AppWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        // Nếu thiết bị đã hỗ trợ DOCUMENT_START_SCRIPT thì không tiêm lặp lại ở onPageStarted
         if (!documentStartInstalled) {
             injectFullShields(view)
         }
@@ -414,14 +416,15 @@ open class AppWebViewClient(
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
         super.doUpdateVisitedHistory(view, url, isReload)
-        // Khi chuyển trang SPA trong YouTube, chỉ đồng bộ nhẹ CSS/Settings (không nạp lại hàng chục KB JS)
         syncLightweightState(view, url)
     }
 
     private fun syncLightweightState(webView: WebView?, url: String?) {
         webView ?: return
         val settingsJson = AppSettings.toJson(context)
+        val sleepLabel = org.json.JSONObject.quote(AppSettings.getSleepTimerLabel())
         val lightScript = buildString {
+            append("window.__braveSleepTimerLabel = $sleepLabel;")
             append("if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;")
             if (!isBrowseMode) {
                 append(injectPlayerUiCssJs)

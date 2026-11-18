@@ -38,7 +38,9 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -62,24 +64,12 @@ class MainActivity : AppCompatActivity() {
         private const val ACTION_PIP_PAUSE = "com.brave.youtubelite.PIP_PAUSE"
         private const val ACTION_PIP_HEADPHONES = "com.brave.youtubelite.PIP_HEADPHONES"
         private const val TAG = "MainActivity"
-        private const val WEB_LOG_TAG = "WebConsole"
-
-        // Đo khung player thật trong trang (CSS px): "left,top,width,height,innerWidth"
-        private const val VIDEO_RECT_JS = "(function(){try{" +
-            "var el=document.getElementById('movie_player')||document.querySelector('.html5-video-player');" +
-            "var v=(window.__bravePip&&window.__bravePip.mainVideo&&window.__bravePip.mainVideo())||document.querySelector('video');" +
-            "var r=el?el.getBoundingClientRect():null;" +
-            "if((!r||r.width<20||r.height<20)&&v){r=v.getBoundingClientRect();}" +
-            "if(!r)return '';" +
-            "return [r.left,r.top,r.width,r.height,window.innerWidth].join(',');" +
-            "}catch(e){return '';}})()"
     }
 
     enum class PanelState {
         HIDDEN, EXPANDED, COLLAPSED
     }
 
-    // Mã JS điều khiển PiP (assets/scriptlets/pip_controller.js), chỉ dùng fallback khi window.__bravePip chưa sẵn sàng
     private var pipControllerJs: String = ""
 
     // TẦNG DƯỚI: Browse WebView (Trang chủ, Kênh, Tìm kiếm, Đăng ký...)
@@ -134,10 +124,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Tỉ lệ khung hình thật của video (cập nhật từ JS) để cửa sổ PiP khớp video
+    // Runnable hẹn giờ tắt video tự động theo số phút
+    private val sleepTimerCountdownRunnable = Runnable {
+        triggerAutoStopVideo(reason = "Đã hết thời gian hẹn giờ — Tự động tắt video")
+    }
+
     private var videoAspectRatio = Rational(16, 9)
 
-    // Receiver lắng nghe các nút trên PiP (Tai nghe / Play-Pause / Next) và MediaService / Notification
     private val mediaActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -158,7 +151,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Đồng bộ cài đặt ban đầu vào Engine
         AdBlockEngine.isEnabled = AppSettings.isAdBlockEnabled(this)
         WebResourceCacheManager.isEnabled = AppSettings.isPreloadCacheEnabled(this)
 
@@ -202,6 +194,8 @@ class MainActivity : AppCompatActivity() {
             openVideoPlayer(targetUrl)
         } else {
             webView.loadUrl(targetUrl)
+            // Pre-warm song song playerWebView chỉ sau 350ms để bấm vào video đầu tiên là có sẵn ngay
+            prewarmPlayerWebViewIfNeeded()
         }
     }
 
@@ -267,10 +261,6 @@ class MainActivity : AppCompatActivity() {
         view.isFocusableInTouchMode = true
     }
 
-    /**
-     * 1. Cấu hình Browse WebView (Tầng dưới): Chuyên duyệt Trang chủ, Kênh, Tìm kiếm...
-     * Khi bấm vào video thông thường (/watch?v=...): Chặn lại và mở bằng Player Layer đè lên!
-     */
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     private fun setupBrowseWebView() {
         configureWebSettings(webView)
@@ -288,8 +278,6 @@ class MainActivity : AppCompatActivity() {
             onPageFinishedCallback = {
                 runOnUiThread {
                     swipeRefreshLayout.isRefreshing = false
-                    // Pre-warm nhẹ playerWebView sau khi trang chủ đã tải xong để lần bấm video đầu tiên mở tức thì
-                    prewarmPlayerWebViewIfNeeded()
                 }
             }
         }
@@ -310,7 +298,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView khi app đang rảnh
+     * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView ngay khi mở app
      * để lần đầu người dùng bấm vào video không phải chờ tải ~4MB base.js từ đầu.
      */
     private fun prewarmPlayerWebViewIfNeeded() {
@@ -320,19 +308,15 @@ class MainActivity : AppCompatActivity() {
             if (panelState == PanelState.HIDDEN && playerWebView.url.isNullOrBlank()) {
                 playerWebView.onResume()
                 playerWebView.loadUrl("https://m.youtube.com")
-                // Sau khi nạp xong framework nền (4.5s), tạm dừng timers của playerWebView cho đến khi người dùng thực sự mở video
                 pipHandler.postDelayed({
                     if (panelState == PanelState.HIDDEN) {
                         playerWebView.onPause()
                     }
-                }, 4500)
+                }, 4000)
             }
-        }, 1200)
+        }, 350)
     }
 
-    /**
-     * 2. Cấu hình Player WebView (Tầng trên): Chuyên dụng phát Video & xử lý PiP
-     */
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     private fun setupPlayerWebView() {
         configureWebSettings(playerWebView)
@@ -367,9 +351,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Cài đặt cử chỉ vuốt kéo mượt mà cho Player Layer
-     */
     @SuppressLint("ClickableViewAccessibility")
     private fun setupPlayerGestures() {
         btnMinimizePlayer.setOnClickListener {
@@ -453,10 +434,8 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Mở một video mới đè lên trang hiện tại:
-     * - Bật lại playerWebView.onResume() và tạm nghỉ webView trang chủ (webView.onPause()) khi player che kín màn hình
-     *   để dồn 100% CPU/GPU cho việc giải mã và tải video.
-     * - Nếu playerWebView đã có sẵn framework YouTube (từ video trước hoặc từ bước pre-warm),
-     *   điều hướng SPA nội bộ (__braveOpenWatchSpa) giúp mở video mới gần như tức thì (< 0.3s) thay vì loadUrl lại từ đầu!
+     * Hủy mọi hiệu ứng thu nhỏ/phóng to đang dở để khi người dùng thao tác nhanh liên tục
+     * không bao giờ xảy ra xung đột animation (khựng hình).
      */
     fun openVideoPlayer(url: String) {
         if (url.isEmpty()) return
@@ -476,10 +455,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             panelState = PanelState.EXPANDED
+            pipHandler.removeCallbacks(pendingCollapseRunnable)
 
-            // Đánh thức playerWebView và tạm nghỉ browse webView bên dưới để không tranh chấp CPU/GPU
             playerWebView.onResume()
             webView.onPause()
+
+            playerPanel.animate().cancel()
+            playerWebView.animate().cancel()
 
             val params = playerPanel.layoutParams as FrameLayout.LayoutParams
             params.height = ViewGroup.LayoutParams.MATCH_PARENT
@@ -487,8 +469,6 @@ class MainActivity : AppCompatActivity() {
             params.bottomMargin = 0
             playerPanel.layoutParams = params
             playerPanel.setBackgroundColor(Color.BLACK)
-
-            playerPanel.animate().cancel()
             playerPanel.visibility = View.VISIBLE
             playerPanel.translationY = 0f
 
@@ -525,13 +505,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Thu nhỏ lớp xem video xuống thanh MiniPlayer ở đáy màn hình (COLLAPSED)
+     * Thu nhỏ lớp xem video xuống thanh MiniPlayer ở đáy màn hình (COLLAPSED):
+     * TỐI ƯU HÓA: Chạy animation trượt ngay lập tức trong 0ms (không đợi evaluateJavascript IPC),
+     * loại bỏ hoàn toàn hiện tượng khựng 1 nhịp khi người dùng vuốt hoặc bấm thu nhỏ nhanh!
      */
     fun collapsePlayer() {
         if (panelState == PanelState.COLLAPSED || panelState == PanelState.HIDDEN) return
         panelState = PanelState.COLLAPSED
 
-        // Đánh thức lại Browse WebView để người dùng lướt trang chủ mượt mà
         webView.onResume()
 
         val fullW = mainContainer.width
@@ -544,13 +525,10 @@ class MainActivity : AppCompatActivity() {
         btnMinimizePlayer.visibility = View.GONE
         playerDragArea.visibility = View.GONE
 
-        playerWebView.evaluateJavascript(VIDEO_RECT_JS) { result ->
-            if (panelState != PanelState.COLLAPSED) return@evaluateJavascript
-            animateToMini(fullW, fullH, parseVideoRect(result))
-        }
+        animateToMiniImmediate(fullW, fullH)
     }
 
-    private fun animateToMini(fullW: Int, fullH: Int, rect: FloatArray?) {
+    private fun animateToMiniImmediate(fullW: Int, fullH: Int) {
         val bottomNavH = dpToPx(bottomNavHeightDp)
         val miniH = dpToPx(64f)
         val boxW = dpToPx(104f)
@@ -558,25 +536,20 @@ class MainActivity : AppCompatActivity() {
         val boxLeft = dpToPx(4f)
         val targetY = (fullH - bottomNavH - miniH).coerceAtLeast(0f)
 
-        var vLeft = 0f
-        var vTop = 0f
-        var vW = fullW.toFloat().coerceAtLeast(1f)
-        var vH = vW * 9f / 16f
-        if (rect != null) {
-            val ratio = if (rect[4] > 0f) fullW / rect[4] else resources.displayMetrics.density
-            vLeft = rect[0] * ratio
-            vTop = rect[1] * ratio
-            vW = (rect[2] * ratio).coerceAtLeast(1f)
-            vH = (rect[3] * ratio).coerceAtLeast(1f)
-        }
+        // Khung player trên playerWebView luôn nằm sát đỉnh (top: 0) nhờ injectPlayerUiCssJs và rộng fullW tỉ lệ 16:9
+        val vW = fullW.toFloat().coerceAtLeast(1f)
+        val vH = vW * 9f / 16f
 
         val scale = minOf(boxW / vW, boxH / vH)
-        val tx = boxLeft + (boxW - vW * scale) / 2f - vLeft * scale
-        val ty = (miniH - vH * scale) / 2f - vTop * scale
+        val tx = boxLeft + (boxW - vW * scale) / 2f
+        val ty = (miniH - vH * scale) / 2f
+
+        playerPanel.animate().cancel()
+        playerWebView.animate().cancel()
 
         playerPanel.animate()
             .translationY(targetY)
-            .setDuration(240)
+            .setDuration(200)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
                 if (panelState != PanelState.COLLAPSED) return@withEndAction
@@ -597,20 +570,9 @@ class MainActivity : AppCompatActivity() {
             .scaleY(scale)
             .translationX(tx)
             .translationY(ty)
-            .setDuration(240)
+            .setDuration(200)
             .setInterpolator(DecelerateInterpolator())
             .start()
-    }
-
-    private fun parseVideoRect(result: String?): FloatArray? {
-        return try {
-            val raw = result?.trim()?.trim('"') ?: return null
-            if (raw.isEmpty() || raw == "null") return null
-            val parts = raw.split(",").map { it.trim().toFloat() }
-            if (parts.size < 5 || parts[2] < 20f || parts[3] < 20f) null else parts.toFloatArray()
-        } catch (_: Exception) {
-            null
-        }
     }
 
     private fun lockPlayerWebViewSize(w: Int, h: Int) {
@@ -642,9 +604,6 @@ class MainActivity : AppCompatActivity() {
         playerWebView.translationY = 0f
     }
 
-    /**
-     * Bung to lớp xem video từ MiniPlayer lên toàn màn hình (EXPANDED)
-     */
     fun expandPlayer() {
         if (panelState == PanelState.EXPANDED || panelState == PanelState.HIDDEN) return
         panelState = PanelState.EXPANDED
@@ -661,6 +620,8 @@ class MainActivity : AppCompatActivity() {
         lockPlayerWebViewSize(fullW, fullH)
 
         playerPanel.animate().cancel()
+        playerWebView.animate().cancel()
+
         val params = playerPanel.layoutParams as FrameLayout.LayoutParams
         params.height = ViewGroup.LayoutParams.MATCH_PARENT
         params.gravity = Gravity.TOP
@@ -675,7 +636,7 @@ class MainActivity : AppCompatActivity() {
 
         playerPanel.animate()
             .translationY(0f)
-            .setDuration(240)
+            .setDuration(200)
             .setInterpolator(DecelerateInterpolator())
             .withEndAction {
                 if (panelState != PanelState.EXPANDED) return@withEndAction
@@ -691,15 +652,11 @@ class MainActivity : AppCompatActivity() {
             .scaleY(1f)
             .translationX(0f)
             .translationY(0f)
-            .setDuration(240)
+            .setDuration(200)
             .setInterpolator(DecelerateInterpolator())
             .start()
     }
 
-    /**
-     * Tắt video player và ẩn lớp phát video (NHƯNG giữ nguyên context YouTube SPA trong playerWebView
-     * để lần bấm video kế tiếp mở tức thì trong 0.2s thay vì phải nạp lại 4MB JS từ about:blank!)
-     */
     fun closePlayer() {
         if (panelState == PanelState.HIDDEN) return
         panelState = PanelState.HIDDEN
@@ -709,10 +666,12 @@ class MainActivity : AppCompatActivity() {
 
         val targetY = mainContainer.height.toFloat()
         playerPanel.animate().cancel()
+        playerWebView.animate().cancel()
         playerPanel.animate()
             .translationY(targetY)
-            .setDuration(200)
+            .setDuration(180)
             .withEndAction {
+                if (panelState != PanelState.HIDDEN) return@withEndAction
                 playerPanel.visibility = View.GONE
                 val params = playerPanel.layoutParams as FrameLayout.LayoutParams
                 params.height = ViewGroup.LayoutParams.MATCH_PARENT
@@ -725,7 +684,6 @@ class MainActivity : AppCompatActivity() {
                 resetPlayerWebViewTransform()
                 unlockPlayerWebViewSize()
 
-                // Dừng video và giải phóng bộ đệm giải mã nhưng giữ nguyên JS runtime của trang YouTube
                 playerWebView.evaluateJavascript(
                     "(function(){try{if(window.__bravePip)window.__bravePip.pause();var v=document.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}catch(e){}})()",
                     null
@@ -826,6 +784,83 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    // ==============================================================
+    // CHẾ ĐỘ HẸN GIỜ TẮT VIDEO TỰ ĐỘNG (GIỐNG CỐC CỐC: TỰ TẮT KHI HẾT VIDEO / THEO PHÚT)
+    // ==============================================================
+    fun showSleepTimerPickerDialog(onUpdated: (() -> Unit)? = null) {
+        val options = arrayOf(
+            "Không",
+            "Khi hết video",
+            "Sau 15 phút",
+            "Sau 30 phút",
+            "Sau 45 phút",
+            "Sau 60 phút",
+            "Sau 90 phút"
+        )
+        val modes = intArrayOf(
+            AppSettings.SLEEP_TIMER_OFF,
+            AppSettings.SLEEP_TIMER_END_OF_VIDEO,
+            15,
+            30,
+            45,
+            60,
+            90
+        )
+        val currentIdx = modes.indexOf(AppSettings.sleepTimerMode).coerceAtLeast(0)
+
+        AlertDialog.Builder(this)
+            .setTitle("Hẹn giờ tắt video")
+            .setSingleChoiceItems(options, currentIdx) { dialog, which ->
+                val selectedMode = modes[which]
+                applySleepTimerMode(selectedMode)
+                onUpdated?.invoke()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Đóng", null)
+            .show()
+    }
+
+    private fun applySleepTimerMode(mode: Int) {
+        pipHandler.removeCallbacks(sleepTimerCountdownRunnable)
+        AppSettings.sleepTimerMode = mode
+        if (mode > 0) {
+            val durationMs = mode * 60_000L
+            AppSettings.sleepTimerTargetElapsedMs = SystemClock.elapsedRealtime() + durationMs
+            pipHandler.postDelayed(sleepTimerCountdownRunnable, durationMs)
+            Toast.makeText(this, "Đã hẹn giờ tắt video sau $mode phút", Toast.LENGTH_SHORT).show()
+        } else if (mode == AppSettings.SLEEP_TIMER_END_OF_VIDEO) {
+            AppSettings.sleepTimerTargetElapsedMs = 0L
+            Toast.makeText(this, "Sẽ tự động tắt khi hết video hiện tại", Toast.LENGTH_SHORT).show()
+        } else {
+            AppSettings.sleepTimerTargetElapsedMs = 0L
+            Toast.makeText(this, "Đã tắt hẹn giờ video", Toast.LENGTH_SHORT).show()
+        }
+        syncSettingsToWeb()
+    }
+
+    /**
+     * Thực thi tự động dừng video khi hết giờ hoặc khi hết video hiện tại
+     */
+    private fun triggerAutoStopVideo(reason: String) {
+        pipHandler.removeCallbacks(sleepTimerCountdownRunnable)
+        AppSettings.sleepTimerMode = AppSettings.SLEEP_TIMER_OFF
+        AppSettings.sleepTimerTargetElapsedMs = 0L
+        syncSettingsToWeb()
+
+        isVideoPlaying = false
+        lastMiniIconPlaying = false
+        btnMiniPlayerPlayPause.setImageResource(android.R.drawable.ic_media_play)
+
+        runPipCommand("pause")
+        stopMediaService()
+        updatePipParams()
+
+        if (isFullscreen) {
+            exitFullscreen()
+        }
+        Toast.makeText(this, reason, Toast.LENGTH_SHORT).show()
+    }
+
     /**
      * Hiển thị BottomSheet Cài đặt ứng dụng
      */
@@ -838,6 +873,8 @@ class MainActivity : AppCompatActivity() {
         val switchBackgroundPlay = dialogView.findViewById<SwitchMaterial>(R.id.switchBackgroundPlay)
         val switchAutoPip = dialogView.findViewById<SwitchMaterial>(R.id.switchAutoPip)
         val switchPreloadCache = dialogView.findViewById<SwitchMaterial>(R.id.switchPreloadCache)
+        val rowSleepTimer = dialogView.findViewById<LinearLayout>(R.id.rowSleepTimer)
+        val tvSleepTimerStatus = dialogView.findViewById<TextView>(R.id.tvSleepTimerStatus)
         val tvCacheSize = dialogView.findViewById<TextView>(R.id.tvCacheSize)
         val btnClearCache = dialogView.findViewById<MaterialButton>(R.id.btnClearCache)
         val btnReloadInSettings = dialogView.findViewById<MaterialButton>(R.id.btnReloadInSettings)
@@ -847,6 +884,13 @@ class MainActivity : AppCompatActivity() {
         switchBackgroundPlay.isChecked = AppSettings.isBackgroundPlayEnabled(this)
         switchAutoPip.isChecked = AppSettings.isAutoPipEnabled(this)
         switchPreloadCache.isChecked = AppSettings.isPreloadCacheEnabled(this)
+
+        fun updateSleepTimerLabel() {
+            val remSec = if (AppSettings.sleepTimerMode > 0 && AppSettings.sleepTimerTargetElapsedMs > 0) {
+                ((AppSettings.sleepTimerTargetElapsedMs - SystemClock.elapsedRealtime()) / 1000L).coerceAtLeast(0L)
+            } else 0L
+            tvSleepTimerStatus.text = AppSettings.getSleepTimerLabel(remSec)
+        }
 
         fun updateCacheDisplay() {
             Thread {
@@ -860,7 +904,14 @@ class MainActivity : AppCompatActivity() {
             }.start()
         }
 
+        updateSleepTimerLabel()
         updateCacheDisplay()
+
+        rowSleepTimer.setOnClickListener {
+            showSleepTimerPickerDialog {
+                updateSleepTimerLabel()
+            }
+        }
 
         switchAdBlock.setOnCheckedChangeListener { _, isChecked ->
             AppSettings.setAdBlockEnabled(this, isChecked)
@@ -911,7 +962,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun syncSettingsToWeb() {
         val settingsJson = AppSettings.toJson(this)
-        val script = "if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;"
+        val remSec = if (AppSettings.sleepTimerMode > 0 && AppSettings.sleepTimerTargetElapsedMs > 0) {
+            ((AppSettings.sleepTimerTargetElapsedMs - SystemClock.elapsedRealtime()) / 1000L).coerceAtLeast(0L)
+        } else 0L
+        val sleepLabel = JSONObject.quote(AppSettings.getSleepTimerLabel(remSec))
+        val script = buildString {
+            append("window.__braveSleepTimerLabel = $sleepLabel;")
+            append("var subEl = document.getElementById('__brave_sleep_timer_menu_sub'); if (subEl) subEl.textContent = $sleepLabel + ' ›';")
+            append("if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;")
+        }
         webView.evaluateJavascript(script, null)
         playerWebView.evaluateJavascript(script, null)
     }
@@ -1031,10 +1090,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Gọi nhanh window.__bravePip.<method>() mà không phải gửi lại 20KB mã nguồn pip_controller.js mỗi lần.
-     * Chỉ chèn lại pipControllerJs nếu trang chưa có window.__bravePip.
-     */
     private fun runPipCommand(method: String, onResult: ((String?) -> Unit)? = null) {
         val target = if (panelState != PanelState.HIDDEN) playerWebView else webView
         val fastScript = "(function(){try{return window.__bravePip ? String(window.__bravePip.$method()) : 'pip:missing';}catch(e){return 'pip:error:' + e;}})();"
@@ -1372,7 +1427,6 @@ class MainActivity : AppCompatActivity() {
         val vid = resolvedVideoId()
         val now = SystemClock.elapsedRealtime()
 
-        // Chống spam startService(ACTION_UPDATE) mỗi giây nếu trạng thái Play/Pause, VideoId, Title không đổi
         val stateChanged = targetPlaying != lastMediaServicePlayingState ||
             currentTitle != lastMediaServiceTitle ||
             vid != lastMediaServiceVideoId
@@ -1476,6 +1530,22 @@ class MainActivity : AppCompatActivity() {
         fun openSettings() {
             runOnUiThread {
                 showSettingsDialog()
+            }
+        }
+
+        @JavascriptInterface
+        fun openSleepTimerDialog() {
+            runOnUiThread {
+                showSleepTimerPickerDialog()
+            }
+        }
+
+        @JavascriptInterface
+        fun onVideoEnded() {
+            runOnUiThread {
+                if (AppSettings.sleepTimerMode == AppSettings.SLEEP_TIMER_END_OF_VIDEO) {
+                    triggerAutoStopVideo(reason = "Đã hết video — Tự động dừng phát")
+                }
             }
         }
 

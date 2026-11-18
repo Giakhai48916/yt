@@ -18,6 +18,21 @@ object AppSettings {
     private const val KEY_AUTO_PIP = "auto_pip_enabled"
     private const val KEY_PRELOAD_CACHE = "preload_cache_enabled"
 
+    /**
+     * Hẹn giờ tắt video tự động (Sleep Timer):
+     *   0  = Không (Tắt)
+     *  -1  = Khi hết video hiện tại
+     * > 0  = Số phút hẹn giờ (15, 30, 45, 60, 90, 120)
+     */
+    const val SLEEP_TIMER_OFF = 0
+    const val SLEEP_TIMER_END_OF_VIDEO = -1
+
+    @Volatile
+    var sleepTimerMode: Int = SLEEP_TIMER_OFF
+
+    @Volatile
+    var sleepTimerTargetElapsedMs: Long = 0L
+
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
@@ -67,8 +82,25 @@ object AppSettings {
     }
 
     /**
+     * Trả về nhãn hiển thị trạng thái Hẹn giờ tắt video hiện tại (giống Cốc Cốc / YouTube)
+     */
+    fun getSleepTimerLabel(remainingSeconds: Long = 0L): String {
+        return when {
+            sleepTimerMode == SLEEP_TIMER_END_OF_VIDEO -> "Khi hết video"
+            sleepTimerMode > 0 -> {
+                if (remainingSeconds > 0) {
+                    val mins = (remainingSeconds + 59) / 60
+                    "Sau $mins phút"
+                } else {
+                    "Sau $sleepTimerMode phút"
+                }
+            }
+            else -> "Không"
+        }
+    }
+
+    /**
      * Xuất cài đặt ra định dạng JSON cho web scriptlet (`window.__bravePip.applySettings(...)`)
-     * Ví dụ: {"adblock":true,"backgroundPlay":true,"autoPip":true,"preloadCache":true}
      */
     fun toJson(context: Context): String {
         val json = JSONObject().apply {
@@ -76,6 +108,8 @@ object AppSettings {
             put("backgroundPlay", isBackgroundPlayEnabled(context))
             put("autoPip", isAutoPipEnabled(context))
             put("preloadCache", isPreloadCacheEnabled(context))
+            put("sleepTimerMode", sleepTimerMode)
+            put("stopAtVideoEnd", sleepTimerMode == SLEEP_TIMER_END_OF_VIDEO)
         }
         return json.toString()
     }
