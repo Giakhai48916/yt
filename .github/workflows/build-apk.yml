@@ -1,14 +1,16 @@
-name: Build LiteTube APK
+name: Build LiteTube (Android APK & iOS IPA)
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch: # Cho phép bấm nút "Run workflow" thủ công trên web GitHub
+    branches: [ "**" ]
+  workflow_dispatch:
 
 jobs:
+  # 1. Đóng gói bản Android (.apk)
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
@@ -30,9 +32,51 @@ jobs:
       - name: Compile và đóng gói file APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Tải file APK lên Artifacts để tải về điện thoại
+      - name: Tải file APK lên Artifacts để tải về điện thoại Android
         uses: actions/upload-artifact@v4
         with:
           name: LiteTube-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+  # 2. Đóng gói bản iOS (.ipa) cho iPhone / iPad
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài đặt XcodeGen và khởi tạo project Xcode
+        working-directory: ios
+        run: |
+          if ! command -v xcodegen &> /dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Biên dịch ứng dụng iOS và đóng gói file LiteTube.ipa
+        working-directory: ios
+        run: |
+          xcodebuild clean build \
+            -project LiteTube.xcodeproj \
+            -scheme LiteTube \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+          mkdir -p build/Payload
+          cp -r build/Build/Products/Release-iphoneos/LiteTube.app build/Payload/
+          cd build
+          zip -r -q LiteTube-iOS.ipa Payload
+
+      - name: Tải file IPA lên Artifacts để cài trên iPhone / iPad
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiteTube-iOS-IPA
+          path: ios/build/LiteTube-iOS.ipa
           retention-days: 14
