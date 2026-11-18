@@ -18,8 +18,8 @@ import java.io.ByteArrayInputStream
  * 1. Chặn request mạng bằng AdBlockEngine
  * 2. Tiêm Scriptlet SSAI Defuser & PiP Controller tại DOCUMENT_START
  * 3. Tiêm bộ luật CSS Cosmetic Filtering bằng textContent (Trusted Types CSP)
- * 4. Tích hợp mục "Hẹn giờ tắt video" ngay trong menu bánh răng (⚙) trên trình phát YouTube
- *    và mục "Cài đặt LiteTube" trong trang select_site.
+ * 4. Chặn triệt để phát tự động (Inline Muted Autoplay Preview) trên Browse WebView để không bao giờ
+ *    bị chồng 2 âm thanh hoặc gây nghẽn decoder phần cứng khi bấm mở video / vào Shorts lần đầu!
  */
 open class AppWebViewClient(
     private val context: Context,
@@ -78,10 +78,20 @@ open class AppWebViewClient(
         })();
     """.trimIndent()
 
+    /**
+     * Scriptlet dành riêng cho Browse WebView (Tầng 1):
+     * - Chặn mọi điều hướng /watch?v=... trên Browse WebView và chuyển sang Player Layer (Tầng 2).
+     * - KHÓA CHẶT việc phát video/âm thanh trên trang chủ (inline preview hoặc leak sang /watch)
+     *   để tuyệt đối không bao giờ xảy ra lỗi 2 luồng âm thanh phát chồng lên nhau!
+     * - Chỉ cho phép Browse WebView phát video khi người dùng đang ở tab `/shorts/`.
+     * - Khi người dùng vào `/shorts/`, tự động báo lên Native tạm dừng MiniPlayer (nếu đang mở)
+     *   để Shorts khởi chạy mượt ngay lập tức mà không bị nghẽn decoder hay chồng tiếng.
+     */
     private val browseWatchInterceptorJs: String = """
         (function() {
             if (window.__braveWatchInterceptorInstalled) return;
             window.__braveWatchInterceptorInstalled = true;
+            window.__braveIsBrowseWebView = true;
 
             var lastDispatchedUrl = '';
             var lastDispatchedTime = 0;
@@ -89,6 +99,25 @@ open class AppWebViewClient(
             function isWatchUrl(url) {
                 if (!url || typeof url !== 'string') return false;
                 return url.indexOf('/watch') !== -1 && url.indexOf('/shorts/') === -1;
+            }
+
+            function isShortsActive() {
+                var p = window.location.pathname || '';
+                return p.indexOf('/shorts') !== -1;
+            }
+
+            function stopAllBrowseVideos() {
+                try {
+                    var vids = document.querySelectorAll('video');
+                    for (var i = 0; i < vids.length; i++) {
+                        var v = vids[i];
+                        if (!v.paused) {
+                            window.__braveAllowPauseUntil = Date.now() + 1000;
+                            (window.__braveNativePause || v.pause).call(v);
+                        }
+                        v.muted = true;
+                    }
+                } catch(e) {}
             }
 
             function dispatchWatchUrl(url) {
@@ -99,6 +128,7 @@ open class AppWebViewClient(
                     fullUrl = origin + (fullUrl.indexOf('/') === 0 ? '' : '/') + fullUrl;
                 }
                 if (isWatchUrl(fullUrl)) {
+                    stopAllBrowseVideos();
                     var now = Date.now();
                     if (fullUrl === lastDispatchedUrl && (now - lastDispatchedTime) < 600) {
                         return true;
@@ -113,13 +143,41 @@ open class AppWebViewClient(
                 return false;
             }
 
-            // 1. Hook history.pushState & replaceState (Lưới an toàn bắt SPA Router của YouTube)
+            // 1. Ngăn chặn tuyệt đối video tự phát (Inline Preview / Leak) trên Trang chủ / Tìm kiếm của Browse WebView!
+            // Chỉ khi người dùng bấm vào tab Shorts (/shorts/) thì mới cho phép thẻ <video> trong Browse WebView phát.
+            document.addEventListener('play', function(e) {
+                var v = e.target;
+                if (!v || v.tagName !== 'VIDEO') return;
+                if (!isShortsActive()) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try {
+                        window.__braveAllowPauseUntil = Date.now() + 1000;
+                        v.muted = true;
+                        (window.__braveNativePause || v.pause).call(v);
+                    } catch(err) {}
+                } else {
+                    // Đang phát Shorts -> báo cho Native tạm dừng Player Layer (nếu có) để tránh chồng 2 tiếng & giải phóng decoder!
+                    if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                        try { window.AndroidBridge.onShortsStarted(); } catch(err2) {}
+                    }
+                }
+            }, true);
+
+            // 2. Hook history.pushState & replaceState (Chặn SPA Router của YouTube)
             try {
                 var origPushState = history.pushState;
                 history.pushState = function(state, title, url) {
-                    if (url && isWatchUrl(String(url))) {
-                        if (dispatchWatchUrl(String(url))) {
-                            return; // Ngăn browse webview chuyển sang URL watch
+                    if (url) {
+                        var sUrl = String(url);
+                        if (isWatchUrl(sUrl)) {
+                            if (dispatchWatchUrl(sUrl)) {
+                                return; // Ngăn browse webview chuyển sang URL watch
+                            }
+                        } else if (sUrl.indexOf('/shorts') !== -1) {
+                            if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                                try { window.AndroidBridge.onShortsStarted(); } catch(eS) {}
+                            }
                         }
                     }
                     return origPushState.apply(history, arguments);
@@ -127,20 +185,41 @@ open class AppWebViewClient(
 
                 var origReplaceState = history.replaceState;
                 history.replaceState = function(state, title, url) {
-                    if (url && isWatchUrl(String(url))) {
-                        if (dispatchWatchUrl(String(url))) {
-                            return;
+                    if (url) {
+                        var sUrl = String(url);
+                        if (isWatchUrl(sUrl)) {
+                            if (dispatchWatchUrl(sUrl)) {
+                                return;
+                            }
+                        } else if (sUrl.indexOf('/shorts') !== -1) {
+                            if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                                try { window.AndroidBridge.onShortsStarted(); } catch(eS2) {}
+                            }
                         }
                     }
                     return origReplaceState.apply(history, arguments);
                 };
             } catch(e) {}
 
-            // 2. Bắt sự kiện click ở Capture Phase (useCapture = true) đón đầu mọi touch/click
+            // 3. Bắt sự kiện click ở Capture Phase (useCapture = true) đón đầu mọi touch/click
             function onDocClick(e) {
                 try {
                     var el = e.target;
                     if (!el || !el.closest) return;
+
+                    // Không chặn nếu người dùng bấm vào nút menu 3 chấm của video
+                    if (el.closest('ytm-menu, .media-item-menu, button[aria-label*="Action" i], button[aria-label*="Thao tác" i], button[aria-label*="More" i], button[aria-label*="Thêm" i]')) {
+                        return;
+                    }
+
+                    // Nếu bấm vào tab Shorts ở thanh đáy -> báo ngay cho Native dọn tài nguyên trước để Shorts vào cực nhanh!
+                    var pivotTab = el.closest('ytm-pivot-bar-item-renderer, [role="tab"]');
+                    if (pivotTab && pivotTab.textContent && pivotTab.textContent.toLowerCase().indexOf('shorts') !== -1) {
+                        if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                            try { window.AndroidBridge.onShortsStarted(); } catch(eTab) {}
+                        }
+                        return;
+                    }
 
                     var anchor = el.closest('a');
                     if (anchor && anchor.href && isWatchUrl(anchor.href)) {
@@ -151,7 +230,7 @@ open class AppWebViewClient(
                         return false;
                     }
 
-                    var videoContainer = el.closest('ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-media-item');
+                    var videoContainer = el.closest('ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-media-item, ytm-playlist-panel-video-renderer');
                     if (videoContainer) {
                         var innerA = videoContainer.querySelector('a[href*="/watch"]');
                         if (innerA && innerA.href && isWatchUrl(innerA.href)) {
@@ -167,13 +246,19 @@ open class AppWebViewClient(
 
             document.addEventListener('click', onDocClick, true);
 
-            // 3. Lắng nghe yt-navigate Polymer event
+            // 4. Lắng nghe yt-navigate Polymer event
             window.addEventListener('yt-navigate', function(e) {
                 try {
-                    if (e && e.detail && e.detail.url && isWatchUrl(e.detail.url)) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        dispatchWatchUrl(e.detail.url);
+                    if (e && e.detail && e.detail.url) {
+                        if (isWatchUrl(e.detail.url)) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            dispatchWatchUrl(e.detail.url);
+                        } else if (String(e.detail.url).indexOf('/shorts') !== -1) {
+                            if (window.AndroidBridge && typeof window.AndroidBridge.onShortsStarted === 'function') {
+                                try { window.AndroidBridge.onShortsStarted(); } catch(eNav) {}
+                            }
+                        }
                     }
                 } catch(err) {}
             }, true);
@@ -329,6 +414,10 @@ open class AppWebViewClient(
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 val origins = setOf("*")
+                // Quan trọng: Chạy browseWatchInterceptorJs TRƯỚC youtube_defuser.js để gắn cờ __braveIsBrowseWebView
+                if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
+                    WebViewCompat.addDocumentStartJavaScript(webView, browseWatchInterceptorJs, origins)
+                }
                 if (WebResourceCacheManager.isEnabled) {
                     val preloadScript = WebResourceCacheManager.getPreloadScript()
                     if (preloadScript.isNotEmpty()) {
@@ -346,9 +435,6 @@ open class AppWebViewClient(
                 }
                 if (selectSiteSettingsScriptletJs.isNotEmpty()) {
                     WebViewCompat.addDocumentStartJavaScript(webView, selectSiteSettingsScriptletJs, origins)
-                }
-                if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
-                    WebViewCompat.addDocumentStartJavaScript(webView, browseWatchInterceptorJs, origins)
                 }
                 if (!isBrowseMode && injectPlayerUiCssJs.isNotEmpty()) {
                     WebViewCompat.addDocumentStartJavaScript(webView, injectPlayerUiCssJs, origins)
@@ -416,6 +502,15 @@ open class AppWebViewClient(
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
         super.doUpdateVisitedHistory(view, url, isReload)
+        // Nếu Browse WebView vô tình lọt sang URL /watch (do YouTube SPA), chặn ngay và chuyển lên Player Layer!
+        if (isBrowseMode && url != null && url.contains("/watch") && !url.contains("/shorts/")) {
+            view?.evaluateJavascript(
+                "(function(){try{var vids=document.querySelectorAll('video');for(var i=0;i<vids.length;i++){vids[i].muted=true;(window.__braveNativePause||vids[i].pause).call(vids[i]);}if(history.length>1)history.back();}catch(e){}})()",
+                null
+            )
+            onInterceptWatchUrl?.invoke(url)
+            return
+        }
         syncLightweightState(view, url)
     }
 
@@ -444,6 +539,9 @@ open class AppWebViewClient(
     private fun injectFullShields(webView: WebView?) {
         webView ?: return
 
+        if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
+            webView.evaluateJavascript(browseWatchInterceptorJs, null)
+        }
         if (WebResourceCacheManager.isEnabled) {
             val preloadScript = WebResourceCacheManager.getPreloadScript()
             if (preloadScript.isNotEmpty()) {
@@ -458,9 +556,6 @@ open class AppWebViewClient(
         }
         if (selectSiteSettingsScriptletJs.isNotEmpty()) {
             webView.evaluateJavascript(selectSiteSettingsScriptletJs, null)
-        }
-        if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
-            webView.evaluateJavascript(browseWatchInterceptorJs, null)
         }
         syncLightweightState(webView, webView.url)
     }

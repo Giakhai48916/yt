@@ -35,6 +35,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -72,7 +73,7 @@ class MainActivity : AppCompatActivity() {
 
     private var pipControllerJs: String = ""
 
-    // TẦNG DƯỚI: Browse WebView (Trang chủ, Kênh, Tìm kiếm, Đăng ký...)
+    // TẦNG DƯỚI: Browse WebView (Trang chủ, Kênh, Tìm kiếm, Đăng ký, Shorts...)
     private lateinit var mainContainer: FrameLayout
     private lateinit var webView: KeepAliveWebView
     private lateinit var swipeRefreshLayout: SwipeRefreshLayout
@@ -84,6 +85,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var playerWebView: KeepAliveWebView
     private lateinit var playerDragArea: View
     private lateinit var btnMinimizePlayer: ImageButton
+    private lateinit var btnSleepTimerQuick: LinearLayout
+    private lateinit var ivSleepTimerQuick: ImageView
+    private lateinit var tvSleepTimerBadge: TextView
     private lateinit var miniPlayerBar: LinearLayout
     private lateinit var miniPlayerInfoContainer: LinearLayout
     private lateinit var tvMiniPlayerTitle: TextView
@@ -187,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         setupPlayerWebView()
         setupPlayerGestures()
         setupBackPressedHandler()
+        updateQuickSleepTimerBadge()
 
         val targetUrl = intent?.dataString ?: "https://m.youtube.com"
         if (targetUrl.contains("/watch") && !targetUrl.contains("/shorts/")) {
@@ -194,7 +199,8 @@ class MainActivity : AppCompatActivity() {
             openVideoPlayer(targetUrl)
         } else {
             webView.loadUrl(targetUrl)
-            // Pre-warm song song playerWebView chỉ sau 350ms để bấm vào video đầu tiên là có sẵn ngay
+            // Pre-warm nhẹ playerWebView bằng trang tĩnh select_site (KHÔNG video feed)
+            // để nạp sẵn JS Polymer mà tuyệt đối không phát ra bất kỳ luồng âm thanh ngầm nào!
             prewarmPlayerWebViewIfNeeded()
         }
     }
@@ -210,6 +216,9 @@ class MainActivity : AppCompatActivity() {
         playerWebView = findViewById(R.id.playerWebView)
         playerDragArea = findViewById(R.id.playerDragArea)
         btnMinimizePlayer = findViewById(R.id.btnMinimizePlayer)
+        btnSleepTimerQuick = findViewById(R.id.btnSleepTimerQuick)
+        ivSleepTimerQuick = findViewById(R.id.ivSleepTimerQuick)
+        tvSleepTimerBadge = findViewById(R.id.tvSleepTimerBadge)
         miniPlayerBar = findViewById(R.id.miniPlayerBar)
         miniPlayerInfoContainer = findViewById(R.id.miniPlayerInfoContainer)
         tvMiniPlayerTitle = findViewById(R.id.tvMiniPlayerTitle)
@@ -223,7 +232,13 @@ class MainActivity : AppCompatActivity() {
             webView.reload()
         }
         swipeRefreshLayout.setOnChildScrollUpCallback { _, _ ->
-            webView.scrollY > 0
+            // Khi đang ở tab Shorts (/shorts/), khóa SwipeRefreshLayout để thao tác vuốt dọc chuyển video Shorts mượt 100%
+            val currentBrowseUrl = webView.url ?: ""
+            if (currentBrowseUrl.contains("/shorts")) {
+                true
+            } else {
+                webView.scrollY > 0
+            }
         }
     }
 
@@ -298,8 +313,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView ngay khi mở app
-     * để lần đầu người dùng bấm vào video không phải chờ tải ~4MB base.js từ đầu.
+     * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView bằng trang tĩnh `select_site`
+     * (tuyệt đối không có video feed nên không bao giờ tự phát nhạc ngầm hay tốn băng thông).
      */
     private fun prewarmPlayerWebViewIfNeeded() {
         if (isPlayerPrewarmed) return
@@ -307,14 +322,14 @@ class MainActivity : AppCompatActivity() {
         pipHandler.postDelayed({
             if (panelState == PanelState.HIDDEN && playerWebView.url.isNullOrBlank()) {
                 playerWebView.onResume()
-                playerWebView.loadUrl("https://m.youtube.com")
+                playerWebView.loadUrl("https://m.youtube.com/select_site")
                 pipHandler.postDelayed({
                     if (panelState == PanelState.HIDDEN) {
                         playerWebView.onPause()
                     }
-                }, 4000)
+                }, 3500)
             }
-        }, 350)
+        }, 500)
     }
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
@@ -355,6 +370,13 @@ class MainActivity : AppCompatActivity() {
     private fun setupPlayerGestures() {
         btnMinimizePlayer.setOnClickListener {
             collapsePlayer()
+        }
+
+        // Nút Hẹn giờ tắt video ở góc trên bên phải video
+        btnSleepTimerQuick.setOnClickListener {
+            showSleepTimerPickerDialog {
+                updateQuickSleepTimerBadge()
+            }
         }
 
         var startY = 0f
@@ -433,9 +455,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Cập nhật giao diện nút Hẹn giờ ở góc trên bên phải video:
+     * - Khi đang tắt: chỉ hiện icon đồng hồ gọn gàng.
+     * - Khi đang bật ("Khi hết video" hoặc "Sau X phút"): đổi sang màu xanh lá nổi bật kèm nhãn trạng thái.
+     */
+    private fun updateQuickSleepTimerBadge() {
+        val mode = AppSettings.sleepTimerMode
+        if (mode == AppSettings.SLEEP_TIMER_OFF) {
+            tvSleepTimerBadge.visibility = View.GONE
+            ivSleepTimerQuick.setColorFilter(Color.WHITE)
+        } else {
+            tvSleepTimerBadge.visibility = View.VISIBLE
+            ivSleepTimerQuick.setColorFilter(Color.parseColor("#4CAF50"))
+            tvSleepTimerBadge.setTextColor(Color.parseColor("#4CAF50"))
+            tvSleepTimerBadge.text = if (mode == AppSettings.SLEEP_TIMER_END_OF_VIDEO) {
+                "Hết video"
+            } else {
+                "${mode}p"
+            }
+        }
+    }
+
+    /**
      * Mở một video mới đè lên trang hiện tại:
-     * Hủy mọi hiệu ứng thu nhỏ/phóng to đang dở để khi người dùng thao tác nhanh liên tục
-     * không bao giờ xảy ra xung đột animation (khựng hình).
+     * Ngắt mọi video/âm thanh trên Browse WebView trước để tuyệt đối không xảy ra hiện tượng 2 âm thanh chồng nhau.
      */
     fun openVideoPlayer(url: String) {
         if (url.isEmpty()) return
@@ -448,7 +491,6 @@ class MainActivity : AppCompatActivity() {
             }
             val newVid = extractVideoIdFromUrl(fullUrl)
 
-            // Nếu bấm lại đúng video đang phát ở MiniPlayer -> chỉ cần bung to lên ngay lập tức!
             if (panelState != PanelState.HIDDEN && newVid.isNotEmpty() && newVid == currentVideoId) {
                 expandPlayer()
                 return@runOnUiThread
@@ -457,6 +499,11 @@ class MainActivity : AppCompatActivity() {
             panelState = PanelState.EXPANDED
             pipHandler.removeCallbacks(pendingCollapseRunnable)
 
+            // Tắt ngay mọi video trên Browse WebView (nếu có) trước khi tạm nghỉ Browse WebView
+            webView.evaluateJavascript(
+                "(function(){try{var vids=document.querySelectorAll('video');for(var i=0;i<vids.length;i++){vids[i].muted=true;(window.__braveNativePause||vids[i].pause).call(vids[i]);}}catch(e){}})()",
+                null
+            )
             playerWebView.onResume()
             webView.onPause()
 
@@ -485,7 +532,9 @@ class MainActivity : AppCompatActivity() {
 
             miniPlayerBar.visibility = View.GONE
             btnMinimizePlayer.visibility = View.VISIBLE
+            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
+            updateQuickSleepTimerBadge()
 
             val currentPlayerUrl = playerWebView.url ?: ""
             if (currentPlayerUrl.contains("youtube.com")) {
@@ -505,9 +554,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Thu nhỏ lớp xem video xuống thanh MiniPlayer ở đáy màn hình (COLLAPSED):
-     * TỐI ƯU HÓA: Chạy animation trượt ngay lập tức trong 0ms (không đợi evaluateJavascript IPC),
-     * loại bỏ hoàn toàn hiện tượng khựng 1 nhịp khi người dùng vuốt hoặc bấm thu nhỏ nhanh!
+     * Thu nhỏ lớp xem video xuống thanh MiniPlayer ở đáy màn hình (COLLAPSED)
      */
     fun collapsePlayer() {
         if (panelState == PanelState.COLLAPSED || panelState == PanelState.HIDDEN) return
@@ -523,6 +570,7 @@ class MainActivity : AppCompatActivity() {
         miniPlayerBar.visibility = View.VISIBLE
         miniPlayerBar.alpha = 1f
         btnMinimizePlayer.visibility = View.GONE
+        btnSleepTimerQuick.visibility = View.GONE
         playerDragArea.visibility = View.GONE
 
         animateToMiniImmediate(fullW, fullH)
@@ -536,7 +584,6 @@ class MainActivity : AppCompatActivity() {
         val boxLeft = dpToPx(4f)
         val targetY = (fullH - bottomNavH - miniH).coerceAtLeast(0f)
 
-        // Khung player trên playerWebView luôn nằm sát đỉnh (top: 0) nhờ injectPlayerUiCssJs và rộng fullW tỉ lệ 16:9
         val vW = fullW.toFloat().coerceAtLeast(1f)
         val vH = vW * 9f / 16f
 
@@ -632,7 +679,9 @@ class MainActivity : AppCompatActivity() {
 
         miniPlayerBar.visibility = View.GONE
         btnMinimizePlayer.visibility = View.VISIBLE
+        btnSleepTimerQuick.visibility = View.VISIBLE
         playerDragArea.visibility = View.VISIBLE
+        updateQuickSleepTimerBadge()
 
         playerPanel.animate()
             .translationY(0f)
@@ -835,16 +884,15 @@ class MainActivity : AppCompatActivity() {
             AppSettings.sleepTimerTargetElapsedMs = 0L
             Toast.makeText(this, "Đã tắt hẹn giờ video", Toast.LENGTH_SHORT).show()
         }
+        updateQuickSleepTimerBadge()
         syncSettingsToWeb()
     }
 
-    /**
-     * Thực thi tự động dừng video khi hết giờ hoặc khi hết video hiện tại
-     */
     private fun triggerAutoStopVideo(reason: String) {
         pipHandler.removeCallbacks(sleepTimerCountdownRunnable)
         AppSettings.sleepTimerMode = AppSettings.SLEEP_TIMER_OFF
         AppSettings.sleepTimerTargetElapsedMs = 0L
+        updateQuickSleepTimerBadge()
         syncSettingsToWeb()
 
         isVideoPlaying = false
@@ -910,6 +958,7 @@ class MainActivity : AppCompatActivity() {
         rowSleepTimer.setOnClickListener {
             showSleepTimerPickerDialog {
                 updateSleepTimerLabel()
+                updateQuickSleepTimerBadge()
             }
         }
 
@@ -1115,6 +1164,7 @@ class MainActivity : AppCompatActivity() {
         pipHandler.removeCallbacks(pendingCollapseRunnable)
         progressBar.visibility = View.GONE
         swipeRefreshLayout.isEnabled = false
+        btnSleepTimerQuick.visibility = View.GONE
 
         if (panelState == PanelState.COLLAPSED) {
             wasCollapsedBeforePip = true
@@ -1135,6 +1185,9 @@ class MainActivity : AppCompatActivity() {
 
             resetPlayerWebViewTransform()
             unlockPlayerWebViewSize()
+        } else if (panelState == PanelState.EXPANDED) {
+            btnMinimizePlayer.visibility = View.GONE
+            playerDragArea.visibility = View.GONE
         }
 
         val target = if (panelState != PanelState.HIDDEN) playerWebView else webView
@@ -1163,11 +1216,16 @@ class MainActivity : AppCompatActivity() {
             wasCollapsedBeforePip = false
             panelState = PanelState.EXPANDED
             btnMinimizePlayer.visibility = View.VISIBLE
+            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
             if (restoreMiniIfCollapsed) {
                 pipHandler.removeCallbacks(pendingCollapseRunnable)
                 pipHandler.postDelayed(pendingCollapseRunnable, 450)
             }
+        } else if (panelState == PanelState.EXPANDED) {
+            btnMinimizePlayer.visibility = View.VISIBLE
+            btnSleepTimerQuick.visibility = View.VISIBLE
+            playerDragArea.visibility = View.VISIBLE
         }
     }
 
@@ -1218,6 +1276,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (panelState == PanelState.EXPANDED) {
             btnMinimizePlayer.visibility = View.VISIBLE
+            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
         }
 
@@ -1536,7 +1595,9 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun openSleepTimerDialog() {
             runOnUiThread {
-                showSleepTimerPickerDialog()
+                showSleepTimerPickerDialog {
+                    updateQuickSleepTimerBadge()
+                }
             }
         }
 
@@ -1545,6 +1606,26 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (AppSettings.sleepTimerMode == AppSettings.SLEEP_TIMER_END_OF_VIDEO) {
                     triggerAutoStopVideo(reason = "Đã hết video — Tự động dừng phát")
+                }
+            }
+        }
+
+        /**
+         * Khi người dùng chuyển sang tab Shorts trên Browse WebView:
+         * Tự động đóng hoặc tạm dừng ngay Player Layer (MiniPlayer) để giải phóng 100% bộ giải mã phần cứng
+         * cho Shorts phát mượt ngay lập tức và không bị chồng 2 âm thanh!
+         */
+        @JavascriptInterface
+        fun onShortsStarted() {
+            runOnUiThread {
+                if (panelState != PanelState.HIDDEN) {
+                    closePlayer()
+                } else {
+                    playerWebView.evaluateJavascript(
+                        "(function(){try{var v=document.querySelector('video');if(v&&!v.paused){(window.__braveNativePause||v.pause).call(v);}}catch(e){}})()",
+                        null
+                    )
+                    playerWebView.onPause()
                 }
             }
         }

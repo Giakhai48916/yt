@@ -1,9 +1,9 @@
 /**
  * BRAVE SHIELDS SCRIPTLET DÀNH CHO LITETUBE
  * 1. Chặn và gọt sạch metadata quảng cáo (InnerTube & SSAI 16x)
- * 2. Điều hướng SPA siêu tốc (Instant SPA Video Switch) không cần tải lại trang
- * 3. Tích hợp "Hẹn giờ tắt video" (Giống Cốc Cốc: Tự tắt khi hết video / Hẹn giờ) ngay trong menu bánh răng (⚙) của trình phát
- * 4. Cơ chế chạy nền & Chống tự động ngắt video khi ở kích thước nhỏ (PLAYER_VIEW_TOO_SMALL)
+ * 2. Điều hướng SPA đơn luồng (Single-Path SPA Switch): Tránh gọi kép gây chồng 2 tiếng & lỗi mã phát!
+ * 3. Tích hợp "Hẹn giờ tắt video" ngay trong menu bánh răng (⚙) và đồng bộ với nút Hẹn giờ góc phải video
+ * 4. Tối ưu tốc độ mở Shorts lần đầu (prefetch Shorts chunk & tự động unmute Shorts tức thì)
  * 5. Đồng bộ trạng thái phát & Media Metadata với Android Native Bridge
  */
 
@@ -111,8 +111,10 @@
     }
 
     // ==============================================================
-    // 1.5. ĐIỀU HƯỚNG SPA SIÊU TỐC KHI ĐỔI VIDEO TRONG PLAYER WEBVIEW
-    //      (Tránh loadUrl toàn bộ trang HTML + 4MB JS mỗi lần bấm video mới)
+    // 1.5. ĐIỀU HƯỚNG SPA ĐƠN LUỒNG SIÊU TỐC KHI ĐỔI VIDEO TRONG PLAYER WEBVIEW
+    //      QUAN TRỌNG: Chỉ dùng DUY NHẤT 1 luồng điều hướng SPA (click thẻ <a> nội bộ của ytm-app),
+    //      TUYỆT ĐỐI KHÔNG gọi chồng chéo tempAnchor.click() + player.loadVideoById() cùng lúc
+    //      (nguyên nhân gây lỗi 2 luồng âm thanh phát đè lên nhau và báo "Mã lượt phát" lỗi)!
     // ==============================================================
     window.__braveOpenWatchSpa = function(targetUrl, videoId) {
         try {
@@ -121,16 +123,18 @@
             window.__braveEndedHandledForVid = '';
             window.__braveProtectPlayUntil = Date.now() + 3000;
 
-            const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-            const ytmApp = document.querySelector('ytm-app') || document.querySelector('ytd-app');
-
-            // Dừng ngay âm thanh của video cũ để người dùng không nghe tiếng video cũ trong lúc chuyển
-            const oldVid = document.querySelector('video');
-            if (oldVid && !oldVid.paused) {
+            // 1. Dừng ngay lập tức mọi thẻ <video> hiện tại để ngắt 100% tiếng của bài cũ trước khi chuyển bài
+            const videos = document.querySelectorAll('video');
+            for (let i = 0; i < videos.length; i++) {
                 try {
-                    window.__braveAllowPauseUntil = Date.now() + 300;
-                    (window.__braveNativePause || oldVid.pause).call(oldVid);
+                    window.__braveAllowPauseUntil = Date.now() + 400;
+                    (window.__braveNativePause || videos[i].pause).call(videos[i]);
                 } catch (eOld) {}
+            }
+
+            const ytmApp = document.querySelector('ytm-app') || document.querySelector('ytd-app');
+            if (!ytmApp || window.location.hostname.indexOf('youtube.com') === -1) {
+                return false;
             }
 
             let pathUrl = targetUrl;
@@ -139,70 +143,54 @@
                 pathUrl = u.pathname + u.search;
             } catch (eUrl) {}
 
-            // Kích hoạt SPA Router của YouTube Mobile bằng thẻ <a> ẩn
-            if (ytmApp && window.location.hostname.indexOf('youtube.com') !== -1) {
-                const tempAnchor = document.createElement('a');
-                tempAnchor.href = pathUrl;
-                tempAnchor.style.display = 'none';
-                (document.body || document.documentElement).appendChild(tempAnchor);
-                tempAnchor.click();
-                setTimeout(function() {
-                    if (tempAnchor.parentNode) tempAnchor.parentNode.removeChild(tempAnchor);
-                }, 80);
-
-                // Đồng thời gọi trực tiếp player.loadVideoById(videoId) để bộ giải mã nạp stream video mới NGAY LẬP TỨC (0ms chờ router)
-                if (videoId && player && typeof player.loadVideoById === 'function') {
-                    try {
-                        player.loadVideoById(videoId);
-                        if (typeof player.playVideo === 'function') player.playVideo();
-                    } catch (eLoad) {}
-                }
-
-                setTimeout(function() {
-                    try {
-                        if (videoId && window.location.href.indexOf(videoId) === -1) {
-                            if (player && typeof player.loadVideoById === 'function') {
-                                player.loadVideoById(videoId);
-                            } else {
-                                window.location.href = targetUrl;
-                            }
-                        }
-                    } catch (eCheck) {}
-                }, 180);
-                return true;
+            // 2. Chỉ dùng duy nhất SPA Router chính chủ của YouTube thông qua 1 lần click <a> ẩn
+            const tempAnchor = document.createElement('a');
+            tempAnchor.href = pathUrl;
+            tempAnchor.style.display = 'none';
+            (document.body || document.documentElement).appendChild(tempAnchor);
+            tempAnchor.click();
+            if (tempAnchor.parentNode) {
+                tempAnchor.parentNode.removeChild(tempAnchor);
             }
+
+            // 3. Fallback an toàn: chỉ khi sau 350ms mà URL vẫn chưa chuyển sang videoId mới thì mới gán location.href
+            setTimeout(function() {
+                try {
+                    if (videoId && window.location.href.indexOf(videoId) === -1) {
+                        window.location.href = targetUrl;
+                    }
+                } catch (eCheck) {}
+            }, 350);
+
+            return true;
         } catch (e) {}
         return false;
     };
 
     // ==============================================================
     // 1.8. TÍCH HỢP MỤC "HẸN GIỜ TẮT VIDEO" VÀO MENU BÁNH RĂNG (⚙) CỦA YOUTUBE PLAYER
-    //      (Giống giao diện Tùy chỉnh video trên Cốc Cốc / YouTube)
     // ==============================================================
     function injectSleepTimerIntoPlayerMenu() {
         try {
             if (document.getElementById('__brave_sleep_timer_menu_item')) {
                 const sub = document.getElementById('__brave_sleep_timer_menu_sub');
-                if (sub) sub.textContent = window.__braveSleepTimerLabel || 'Không';
+                if (sub) sub.textContent = (window.__braveSleepTimerLabel || 'Không') + ' ›';
                 return;
             }
 
-            // Tìm menu bottom-sheet đang mở của YouTube Mobile khi bấm vào nút bánh răng (⚙)
-            const menuList = document.querySelector(
-                'ytm-menu-popup-renderer .menu-content, ' +
-                'bottom-sheet-layout .bottom-sheet-media-menu-item, ' +
-                'div.bottom-sheet-content ytm-Single-column-watch-next-results-renderer, ' +
-                '.ytp-settings-menu .ytp-panel-menu, ' +
-                'ytm-bottom-sheet-renderer [role="menu"], ' +
-                'div[role="dialog"] ytm-menu-item, ' +
-                'ytm-menu-item'
+            // Tìm danh sách các dòng cài đặt đang hiển thị trong bottom sheet của YouTube Mobile
+            const items = document.querySelectorAll(
+                'ytm-menu-item, .bottom-sheet-media-menu-item, ytm-option-service-item-renderer, .ytp-menuitem'
             );
-            if (!menuList) return;
-
-            const container = menuList.tagName === 'YTM-MENU-ITEM' ? menuList.parentElement : (
-                menuList.classList.contains('bottom-sheet-media-menu-item') ? menuList.parentElement : menuList
-            );
-            if (!container || container.offsetHeight <= 0) return;
+            let targetItem = null;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].offsetHeight > 0) {
+                    targetItem = items[i];
+                    break;
+                }
+            }
+            if (!targetItem || !targetItem.parentElement) return;
+            const container = targetItem.parentElement;
 
             const item = document.createElement('div');
             item.id = '__brave_sleep_timer_menu_item';
@@ -232,7 +220,7 @@
             const rightLabel = document.createElement('span');
             rightLabel.id = '__brave_sleep_timer_menu_sub';
             rightLabel.textContent = (window.__braveSleepTimerLabel || 'Không') + ' ›';
-            rightLabel.style.cssText = 'font-size:14px;color:#aaa;margin-left:12px;flex-shrink:0;';
+            rightLabel.style.cssText = 'font-size:14px;color:#3ea6ff;margin-left:12px;flex-shrink:0;font-weight:500;';
 
             item.appendChild(leftWrap);
             item.appendChild(rightLabel);
@@ -240,9 +228,8 @@
             item.addEventListener('click', function(e) {
                 e.preventDefault();
                 e.stopPropagation();
-                // Đóng menu bánh răng của YouTube bằng cách chạm nhẹ backdrop nếu có
                 try {
-                    const backdrop = document.querySelector('c3-overlay, .bottom-sheet-Show-overlay, .ytm-menu-popup-renderer-backdrop');
+                    const backdrop = document.querySelector('c3-overlay, .bottom-sheet-layout-Takeover-backdrop, .ytm-menu-popup-renderer-backdrop');
                     if (backdrop) backdrop.click();
                 } catch (eClose) {}
                 if (window.AndroidBridge && typeof window.AndroidBridge.openSleepTimerDialog === 'function') {
@@ -254,14 +241,13 @@
         } catch (e) {}
     }
 
-    // Khi người dùng bấm vào nút bánh răng cài đặt video trên trình phát -> chèn ngay mục "Hẹn giờ tắt video"
     document.addEventListener('click', function(e) {
         const t = e.target;
         if (!t || !t.closest) return;
-        if (t.closest('.player-settings-icon, button[aria-label*="Settings" i], button[aria-label*="Cài đặt" i], .ytp-settings-button')) {
-            setTimeout(injectSleepTimerIntoPlayerMenu, 80);
-            setTimeout(injectSleepTimerIntoPlayerMenu, 220);
-            setTimeout(injectSleepTimerIntoPlayerMenu, 450);
+        if (t.closest('.player-settings-icon, button[aria-label*="Settings" i], button[aria-label*="Cài đặt" i], .ytp-settings-button, ytm-Single-column-watch-next-results-renderer button')) {
+            setTimeout(injectSleepTimerIntoPlayerMenu, 60);
+            setTimeout(injectSleepTimerIntoPlayerMenu, 180);
+            setTimeout(injectSleepTimerIntoPlayerMenu, 380);
         }
     }, true);
 
@@ -396,8 +382,26 @@
     };
 
     // ==============================================================
-    // 4. TỈ LỆ KHUNG HÌNH VIDEO CHO CỬA SỔ PIP & BẮT SỰ KIỆN KẾT THÚC VIDEO
+    // 4. TỈ LỆ KHUNG HÌNH VIDEO, SINGLE-VIDEO GUARD & TỰ TẮT KHI HẾT VIDEO
     // ==============================================================
+    // Đảm bảo trong cùng 1 WebView không bao giờ có 2 thẻ <video> cùng phát âm thanh một lúc!
+    document.addEventListener('playing', function(e) {
+        const currentV = e.target;
+        if (!currentV || currentV.tagName !== 'VIDEO') return;
+        const allVideos = document.querySelectorAll('video');
+        if (allVideos.length > 1) {
+            for (let i = 0; i < allVideos.length; i++) {
+                const other = allVideos[i];
+                if (other !== currentV && !other.paused) {
+                    try {
+                        window.__braveAllowPauseUntil = Date.now() + 400;
+                        (window.__braveNativePause || other.pause).call(other);
+                    } catch (eOther) {}
+                }
+            }
+        }
+    }, true);
+
     function pickMainVideo() {
         if (window.__bravePip && window.__bravePip.mainVideo) return window.__bravePip.mainVideo();
         const videos = document.querySelectorAll('video');
@@ -428,7 +432,6 @@
         }, true);
     });
 
-    // Bắt sự kiện khi video phát đến cuối để xử lý chế độ "Tự động tắt khi hết video" (chặn luôn Autoplay sang bài tiếp theo)
     window.__braveEndedHandledForVid = '';
     function handleCheckVideoEnd(v) {
         if (!v || !isStopAtVideoEndEnabled() || isAdPlaying || isAdShowingNow()) return;
@@ -436,7 +439,6 @@
         const cur = v.currentTime;
         if (!isFinite(dur) || dur <= 3) return;
 
-        // Khi video kết thúc (ended) hoặc còn dưới 0.45 giây cuối cùng: dừng ngay trước khi YouTube kịp chuyển sang bài tiếp theo trong Mix/Playlist
         if (v.ended || (dur - cur <= 0.45 && cur > 1)) {
             const vidKey = extractVideoId() || 'current';
             if (window.__braveEndedHandledForVid === vidKey) return;
@@ -526,6 +528,9 @@
 
     function tryAutoUnmute() {
         try {
+            const path = window.location.pathname || '';
+            // Trên Browse WebView: chỉ tự động bật tiếng khi đang ở trong tab Shorts (/shorts)
+            if (window.__braveIsBrowseWebView && path.indexOf('/shorts') === -1) return;
             if (isAdPlaying || isAdShowingNow()) return;
 
             const video = pickMainVideo();
@@ -651,6 +656,8 @@
     ['play', 'playing'].forEach(function(eventType) {
         document.addEventListener(eventType, function(e) {
             if (e.target && e.target.tagName === 'VIDEO') {
+                const path = window.location.pathname || '';
+                if (window.__braveIsBrowseWebView && path.indexOf('/shorts') === -1) return;
                 window.__braveUserPaused = false;
                 tryAutoUnmute();
                 syncNativeState();
@@ -661,6 +668,8 @@
     ['loadedmetadata', 'durationchange', 'seeked', 'ratechange'].forEach(function(eventType) {
         document.addEventListener(eventType, function(e) {
             if (e.target && e.target.tagName === 'VIDEO') {
+                const path = window.location.pathname || '';
+                if (window.__braveIsBrowseWebView && path.indexOf('/shorts') === -1) return;
                 tryAutoUnmute();
                 syncNativeState();
             }
