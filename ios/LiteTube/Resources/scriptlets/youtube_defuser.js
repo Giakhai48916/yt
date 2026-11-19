@@ -168,88 +168,51 @@
     };
 
     // ==============================================================
-    // 1.8. TÍCH HỢP MỤC "HẸN GIỜ TẮT VIDEO" VÀO MENU CỦA NÚT `button.icon-button.player-settings-icon`
-    //      - Gắn trực tiếp sự kiện vào đúng nút `button.icon-button.player-settings-icon` (aria-label="Cài đặt cách phát")
-    //      - Dùng MutationObserver nhẹ ở cấp trực tiếp của document.body (subtree: false -> 0% lag)
-    //        để bắt ngay khoảnh khắc YouTube mở bottom-sheet cài đặt video và chèn dòng Đồng hồ Hẹn giờ!
+    // 1.8. TÍCH HỢP MỤC "HẸN GIỜ TẮT VIDEO" VÀO MENU CÀI ĐẶT BÁNH RĂNG (⚙) CỦA YOUTUBE PLAYER
+    //      Dùng TreeWalker tìm trực tiếp dòng "Thống kê chi tiết" / "Sao chép thông tin gỡ lỗi" / "Lặp lại"
+    //      trong menu đang mở -> 100% không phụ thuộc tên thẻ hay class bị YouTube đổi!
     // ==============================================================
-    var SLEEP_MENU_KEYWORDS = [
-        "chất lượng", "quality",
-        "tốc độ", "playback speed",
-        "lặp lại", "loop video",
-        "thống kê chi tiết", "stats for nerds",
-        "sao chép thông tin gỡ lỗi", "copy debug info",
-        "chế độ môi trường xung quanh", "ambient mode",
-        "âm lượng ổn định", "stable volume"
+    var SLEEP_ANCHOR_TEXTS = [
+        "thống kê chi tiết",
+        "stats for nerds",
+        "sao chép thông tin gỡ lỗi",
+        "copy debug info",
+        "âm lượng ổn định",
+        "stable volume"
     ];
 
-    function collectRoots() {
-        var roots = [document];
-        try {
-            var bodyChildren = document.body ? document.body.children : [];
-            for (var i = 0; i < bodyChildren.length; i++) {
-                if (bodyChildren[i].shadowRoot) roots.push(bodyChildren[i].shadowRoot);
-            }
-        } catch (e) {}
-        return roots;
+    function isAnchorText(str) {
+        if (!str) return false;
+        var s = str.trim().toLowerCase();
+        if (s.length < 4 || s.length > 40) return false;
+        for (var i = 0; i < SLEEP_ANCHOR_TEXTS.length; i++) {
+            if (s === SLEEP_ANCHOR_TEXTS[i]) return true;
+        }
+        return false;
     }
 
-    function findSettingsMenuListContainer() {
-        var roots = collectRoots();
-        for (var ri = 0; ri < roots.length; ri++) {
-            var root = roots[ri];
-            var candidates = root.querySelectorAll(
-                "bottom-sheet-layout, bottom-sheet-container, ytm-bottom-sheet-renderer, " +
-                "ytm-menu-popup-renderer, tp-yt-paper-dialog, .ytp-settings-menu, " +
-                "[role=\"dialog\"], [role=\"menu\"], .bottom-sheet-content, yt-list-view-model, c3-overlay"
-            );
-            for (var s = 0; s < candidates.length; s++) {
-                var sheet = candidates[s];
-                if (!sheet || sheet.offsetHeight < 80 || sheet.offsetWidth < 120) continue;
-                var fullText = (sheet.textContent || "").toLowerCase();
-                var matchedCount = 0;
-                for (var k = 0; k < SLEEP_MENU_KEYWORDS.length; k++) {
-                    if (fullText.indexOf(SLEEP_MENU_KEYWORDS[k]) !== -1) {
-                        matchedCount++;
-                        if (matchedCount >= 2) break;
-                    }
-                }
-                if (matchedCount < 2) continue;
+    function findSettingsMenuAnchorRow() {
+        if (!document.body) return null;
+        try {
+            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            var node;
+            while ((node = walker.nextNode())) {
+                if (!isAnchorText(node.nodeValue)) continue;
+                var el = node.parentElement;
+                if (!el || el.offsetHeight <= 0 || el.offsetWidth <= 0) continue;
 
-                // Ưu tiên thẻ danh sách chuẩn của YouTube Mobile (yt-list-view-model / role=menu / .menu-content)
-                var listEl = sheet.querySelector(
-                    "yt-list-view-model, [role=\"menu\"], .menu-content, .ytp-panel-menu, .bottom-sheet-media-menu-item-list"
-                );
-                if (listEl && listEl.children && listEl.children.length >= 2) {
-                    return listEl;
-                }
-
-                // Fallback: đi tìm trực tiếp dòng có chữ "Chất lượng" / "Lặp lại" / "Thống kê" rồi lấy thẻ cha chứa danh sách các dòng
-                var allRows = sheet.querySelectorAll(
-                    "yt-list-item-view-model, ytm-menu-item, .bottom-sheet-media-menu-item, " +
-                    "ytm-option-service-item-renderer, [role=\"menuitem\"], [role=\"listitem\"], " +
-                    ".ytp-menuitem, button, div[tabindex], div"
-                );
-                for (var r = 0; r < allRows.length; r++) {
-                    var row = allRows[r];
-                    if (!row || row.offsetHeight < 32 || row.offsetHeight > 88) continue;
-                    var rt = (row.textContent || "").trim().toLowerCase();
-                    if (rt.length > 40) continue;
-                    if (rt.indexOf("chất lượng") !== -1 || rt.indexOf("quality") !== -1 ||
-                        rt.indexOf("lặp lại") !== -1 || rt.indexOf("thống kê chi tiết") !== -1 ||
-                        rt.indexOf("stats for nerds") !== -1) {
-                        var p = row.parentElement;
-                        for (var up = 0; up < 4 && p && p !== sheet; up++) {
-                            if (p.children && p.children.length >= 4) {
-                                return p;
-                            }
-                            p = p.parentElement;
-                        }
-                        if (row.parentElement) return row.parentElement;
+                // Leo lên tối đa 6 bậc từ chữ để tìm đúng thẻ "dòng menu" (row) có >= 4 dòng anh em cùng cấp
+                var cur = el;
+                for (var up = 0; up < 6 && cur && cur !== document.body; up++) {
+                    var parent = cur.parentElement;
+                    if (parent && parent.children && parent.children.length >= 4 &&
+                        cur.offsetHeight >= 32 && cur.offsetHeight <= 100) {
+                        return { container: parent, anchorRow: cur };
                     }
+                    cur = parent;
                 }
             }
-        }
+        } catch (e) {}
         return null;
     }
 
@@ -269,8 +232,8 @@
                 return true;
             }
 
-            var container = findSettingsMenuListContainer();
-            if (!container) return false;
+            var found = findSettingsMenuAnchorRow();
+            if (!found || !found.container) return false;
 
             if (existing && existing.parentNode) {
                 existing.parentNode.removeChild(existing);
@@ -321,10 +284,11 @@
                 e.preventDefault();
                 e.stopPropagation();
                 e.stopImmediatePropagation();
+                // Đóng bottom-sheet cài đặt của YouTube trước khi mở bảng chọn hẹn giờ Native
                 try {
                     var backdrop = document.querySelector(
                         "c3-overlay, .bottom-sheet-layout-Takeover-backdrop, " +
-                        ".ytm-menu-popup-renderer-backdrop, .overlay-backdrop, [role=\"presentation\"]"
+                        ".ytm-menu-popup-renderer-backdrop, .overlay-backdrop, .scrim"
                     );
                     if (backdrop && typeof backdrop.click === "function") backdrop.click();
                 } catch (eClose) {}
@@ -335,7 +299,8 @@
 
             item.addEventListener("click", onOpenTimer, true);
 
-            // Chèn ngay sau mục "Lặp lại" / "Loop", hoặc ở cuối danh sách
+            // Chèn ngay dưới dòng "Lặp lại" / "Loop", hoặc ngay trước dòng "Sao chép thông tin gỡ lỗi"
+            var container = found.container;
             var inserted = false;
             var children = container.children;
             for (var i = 0; i < children.length; i++) {
@@ -351,7 +316,7 @@
                 }
             }
             if (!inserted) {
-                container.appendChild(item);
+                container.insertBefore(item, found.anchorRow);
             }
             return true;
         } catch (e) {
@@ -369,14 +334,14 @@
         if (injectSleepTimerIntoPlayerMenu()) return;
         sleepMenuPollTimer = setInterval(function() {
             attempts++;
-            if (injectSleepTimerIntoPlayerMenu() || attempts >= 20) {
+            if (injectSleepTimerIntoPlayerMenu() || attempts >= 25) {
                 clearInterval(sleepMenuPollTimer);
                 sleepMenuPollTimer = null;
             }
         }, 80);
     }
 
-    // 1) Bắt trực tiếp vào nút `button.icon-button.player-settings-icon` (đúng class của nút bánh răng YouTube)
+    // Bắt trực tiếp vào nút `button.icon-button.player-settings-icon` (bánh răng ⚙ trên trình phát)
     ["click", "touchend", "pointerup"].forEach(function(evType) {
         document.addEventListener(evType, function(e) {
             var t = e.target;
@@ -391,30 +356,6 @@
             }
         }, true);
     });
-
-    // 2) MutationObserver siêu nhẹ CHỈ quan sát con trực tiếp của document.body (subtree: false -> không gây lag)
-    //    để tự động chèn ngay khi YouTube gắn bottom-sheet cài đặt vào cuối body
-    function attachTopLevelSheetObserver() {
-        if (!document.body || window.__braveSheetObsAttached) return;
-        window.__braveSheetObsAttached = true;
-        try {
-            var obs = new MutationObserver(function(mutations) {
-                if ((window.location.pathname || "").indexOf("/watch") === -1) return;
-                for (var i = 0; i < mutations.length; i++) {
-                    if (mutations[i].addedNodes && mutations[i].addedNodes.length > 0) {
-                        scheduleSleepMenuInjection();
-                        break;
-                    }
-                }
-            });
-            obs.observe(document.body, { childList: true, subtree: false });
-        } catch (e) {}
-    }
-    if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", attachTopLevelSheetObserver);
-    } else {
-        attachTopLevelSheetObserver();
-    }
 
     // ==============================================================
     // 2. KHẮC CHẾ QUẢNG CÁO GHÉP LUỒNG (SSAI) - TUA 16X & AUTO-SKIP
@@ -793,6 +734,7 @@
         }
 
         tryAutoUnmute();
+        if (path.indexOf("/watch") !== -1) injectSleepTimerIntoPlayerMenu();
 
         const video = pickMainVideo();
         if (video) {
