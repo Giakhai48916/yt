@@ -286,6 +286,23 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     swipeRefreshLayout.isRefreshing = false
                 }
+            }
+        }
+        browseClient.installDocumentStartScripts(webView)
+        webView.webViewClient = browseClient
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress < 100) {
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.progress = newProgress
+                } else {
+                    progressBar.visibility = View.GONE
+                    swipeRefreshLayout.isRefreshing = false
+                }
+            }
+        }
+    }
 
     /**
      * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView bằng trang tĩnh `select_site`
@@ -419,23 +436,6 @@ class MainActivity : AppCompatActivity() {
 
         btnMiniPlayerClose.setOnClickListener {
             closePlayer()
-        }
-    }
-        browseClient.installDocumentStartScripts(webView)
-        webView.webViewClient = browseClient
-
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                if (newProgress < 100) {
-                    progressBar.visibility = View.VISIBLE
-                    progressBar.progress = newProgress
-                } else {
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                }
-            }
-        }
-    }
         }
     }
 
