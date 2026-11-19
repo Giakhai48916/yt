@@ -35,7 +35,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.ImageButton
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -85,9 +84,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var playerWebView: KeepAliveWebView
     private lateinit var playerDragArea: View
     private lateinit var btnMinimizePlayer: ImageButton
-    private lateinit var btnSleepTimerQuick: LinearLayout
-    private lateinit var ivSleepTimerQuick: ImageView
-    private lateinit var tvSleepTimerBadge: TextView
     private lateinit var miniPlayerBar: LinearLayout
     private lateinit var miniPlayerInfoContainer: LinearLayout
     private lateinit var tvMiniPlayerTitle: TextView
@@ -191,7 +187,6 @@ class MainActivity : AppCompatActivity() {
         setupPlayerWebView()
         setupPlayerGestures()
         setupBackPressedHandler()
-        updateQuickSleepTimerBadge()
 
         val targetUrl = intent?.dataString ?: "https://m.youtube.com"
         if (targetUrl.contains("/watch") && !targetUrl.contains("/shorts/")) {
@@ -216,9 +211,6 @@ class MainActivity : AppCompatActivity() {
         playerWebView = findViewById(R.id.playerWebView)
         playerDragArea = findViewById(R.id.playerDragArea)
         btnMinimizePlayer = findViewById(R.id.btnMinimizePlayer)
-        btnSleepTimerQuick = findViewById(R.id.btnSleepTimerQuick)
-        ivSleepTimerQuick = findViewById(R.id.ivSleepTimerQuick)
-        tvSleepTimerBadge = findViewById(R.id.tvSleepTimerBadge)
         miniPlayerBar = findViewById(R.id.miniPlayerBar)
         miniPlayerInfoContainer = findViewById(R.id.miniPlayerInfoContainer)
         tvMiniPlayerTitle = findViewById(R.id.tvMiniPlayerTitle)
@@ -294,23 +286,6 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     swipeRefreshLayout.isRefreshing = false
                 }
-            }
-        }
-        browseClient.installDocumentStartScripts(webView)
-        webView.webViewClient = browseClient
-
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                if (newProgress < 100) {
-                    progressBar.visibility = View.VISIBLE
-                    progressBar.progress = newProgress
-                } else {
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                }
-            }
-        }
-    }
 
     /**
      * Khởi động sẵn V8 & Polymer framework của YouTube trong playerWebView bằng trang tĩnh `select_site`
@@ -370,13 +345,6 @@ class MainActivity : AppCompatActivity() {
     private fun setupPlayerGestures() {
         btnMinimizePlayer.setOnClickListener {
             collapsePlayer()
-        }
-
-        // Nút Hẹn giờ tắt video ở góc trên bên phải video
-        btnSleepTimerQuick.setOnClickListener {
-            showSleepTimerPickerDialog {
-                updateQuickSleepTimerBadge()
-            }
         }
 
         var startY = 0f
@@ -453,26 +421,21 @@ class MainActivity : AppCompatActivity() {
             closePlayer()
         }
     }
+        browseClient.installDocumentStartScripts(webView)
+        webView.webViewClient = browseClient
 
-    /**
-     * Cập nhật giao diện nút Hẹn giờ ở góc trên bên phải video:
-     * - Khi đang tắt: chỉ hiện icon đồng hồ gọn gàng.
-     * - Khi đang bật ("Khi hết video" hoặc "Sau X phút"): đổi sang màu xanh lá nổi bật kèm nhãn trạng thái.
-     */
-    private fun updateQuickSleepTimerBadge() {
-        val mode = AppSettings.sleepTimerMode
-        if (mode == AppSettings.SLEEP_TIMER_OFF) {
-            tvSleepTimerBadge.visibility = View.GONE
-            ivSleepTimerQuick.setColorFilter(Color.WHITE)
-        } else {
-            tvSleepTimerBadge.visibility = View.VISIBLE
-            ivSleepTimerQuick.setColorFilter(Color.parseColor("#4CAF50"))
-            tvSleepTimerBadge.setTextColor(Color.parseColor("#4CAF50"))
-            tvSleepTimerBadge.text = if (mode == AppSettings.SLEEP_TIMER_END_OF_VIDEO) {
-                "Hết video"
-            } else {
-                "${mode}p"
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress < 100) {
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.progress = newProgress
+                } else {
+                    progressBar.visibility = View.GONE
+                    swipeRefreshLayout.isRefreshing = false
+                }
             }
+        }
+    }
         }
     }
 
@@ -532,9 +495,7 @@ class MainActivity : AppCompatActivity() {
 
             miniPlayerBar.visibility = View.GONE
             btnMinimizePlayer.visibility = View.VISIBLE
-            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
-            updateQuickSleepTimerBadge()
 
             val currentPlayerUrl = playerWebView.url ?: ""
             if (currentPlayerUrl.contains("youtube.com")) {
@@ -570,7 +531,6 @@ class MainActivity : AppCompatActivity() {
         miniPlayerBar.visibility = View.VISIBLE
         miniPlayerBar.alpha = 1f
         btnMinimizePlayer.visibility = View.GONE
-        btnSleepTimerQuick.visibility = View.GONE
         playerDragArea.visibility = View.GONE
 
         animateToMiniImmediate(fullW, fullH)
@@ -679,9 +639,7 @@ class MainActivity : AppCompatActivity() {
 
         miniPlayerBar.visibility = View.GONE
         btnMinimizePlayer.visibility = View.VISIBLE
-        btnSleepTimerQuick.visibility = View.VISIBLE
         playerDragArea.visibility = View.VISIBLE
-        updateQuickSleepTimerBadge()
 
         playerPanel.animate()
             .translationY(0f)
@@ -884,7 +842,6 @@ class MainActivity : AppCompatActivity() {
             AppSettings.sleepTimerTargetElapsedMs = 0L
             Toast.makeText(this, "Đã tắt hẹn giờ video", Toast.LENGTH_SHORT).show()
         }
-        updateQuickSleepTimerBadge()
         syncSettingsToWeb()
     }
 
@@ -892,7 +849,6 @@ class MainActivity : AppCompatActivity() {
         pipHandler.removeCallbacks(sleepTimerCountdownRunnable)
         AppSettings.sleepTimerMode = AppSettings.SLEEP_TIMER_OFF
         AppSettings.sleepTimerTargetElapsedMs = 0L
-        updateQuickSleepTimerBadge()
         syncSettingsToWeb()
 
         isVideoPlaying = false
@@ -958,7 +914,6 @@ class MainActivity : AppCompatActivity() {
         rowSleepTimer.setOnClickListener {
             showSleepTimerPickerDialog {
                 updateSleepTimerLabel()
-                updateQuickSleepTimerBadge()
             }
         }
 
@@ -1164,7 +1119,6 @@ class MainActivity : AppCompatActivity() {
         pipHandler.removeCallbacks(pendingCollapseRunnable)
         progressBar.visibility = View.GONE
         swipeRefreshLayout.isEnabled = false
-        btnSleepTimerQuick.visibility = View.GONE
 
         if (panelState == PanelState.COLLAPSED) {
             wasCollapsedBeforePip = true
@@ -1216,7 +1170,6 @@ class MainActivity : AppCompatActivity() {
             wasCollapsedBeforePip = false
             panelState = PanelState.EXPANDED
             btnMinimizePlayer.visibility = View.VISIBLE
-            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
             if (restoreMiniIfCollapsed) {
                 pipHandler.removeCallbacks(pendingCollapseRunnable)
@@ -1224,7 +1177,6 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (panelState == PanelState.EXPANDED) {
             btnMinimizePlayer.visibility = View.VISIBLE
-            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
         }
     }
@@ -1276,7 +1228,6 @@ class MainActivity : AppCompatActivity() {
         }
         if (panelState == PanelState.EXPANDED) {
             btnMinimizePlayer.visibility = View.VISIBLE
-            btnSleepTimerQuick.visibility = View.VISIBLE
             playerDragArea.visibility = View.VISIBLE
         }
 
@@ -1596,7 +1547,6 @@ class MainActivity : AppCompatActivity() {
         fun openSleepTimerDialog() {
             runOnUiThread {
                 showSleepTimerPickerDialog {
-                    updateQuickSleepTimerBadge()
                 }
             }
         }

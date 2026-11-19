@@ -45,49 +45,14 @@
             android:contentDescription="Thu nhỏ"
             android:tint="@color/white" />
 
-        <!-- Nút Hẹn giờ tắt video (đồng hồ) ở góc trên bên phải video (nằm ngay cạnh nút CC & Cài đặt của YouTube) -->
-        <LinearLayout
-            android:id="@+id/btnSleepTimerQuick"
-            android:layout_width="wrap_content"
-            android:layout_height="34dp"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="7dp"
-            android:layout_marginEnd="96dp"
-            android:background="@drawable/bg_floating_pill"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="8dp"
-            android:paddingEnd="8dp">
-
-            <ImageView
-                android:id="@+id/ivSleepTimerQuick"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:src="@drawable/ic_sleep_timer"
-                android:tint="@color/white" />
-
-            <TextView
-                android:id="@+id/tvSleepTimerBadge"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:text="Hẹn giờ"
-                android:textColor="@color/white"
-                android:textSize="11sp"
-                android:textStyle="bold"
-                android:visibility="gone" />
-        </LinearLayout>
-
-        <!-- Lớp phủ bắt cử chỉ vuốt kéo trên khu vực mép trên giữa của video khi xem to -->
+        <!-- Lớp phủ bắt cử chỉ vuốt kéo trên khu vực mép trên giữa của video khi xem to (chừa góc phải cho nút CC & Cài đặt YouTube) -->
         <View
             android:id="@+id/playerDragArea"
             android:layout_width="match_parent"
             android:layout_height="44dp"
             android:layout_gravity="top"
-            android:layout_marginStart="50dp"
-            android:layout_marginEnd="152dp"
+            android:layout_marginStart="56dp"
+            android:layout_marginEnd="108dp"
             android:background="@android:color/transparent" />
 
         <!-- Thanh điều khiển MiniPlayer hiển thị ở đáy khi thu nhỏ -->

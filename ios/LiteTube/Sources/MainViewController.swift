@@ -39,7 +39,6 @@ final class MainViewController: UIViewController {
     private let playerPanel = UIView()
     private var playerWebView: WKWebView!
     private let btnMinimizePlayer = UIButton(type: .system)
-    private let btnSleepTimerQuick = UIButton(type: .system)
     private let playerDragArea = UIView()
 
     // Thanh MiniPlayer Bar khi thu nhỏ ở đáy màn hình
@@ -113,7 +112,6 @@ final class MainViewController: UIViewController {
         setupGestures()
         setupRemoteTransportControls()
         setupAppLifecycleObservers()
-        updateQuickSleepTimerButton()
 
         // Biên dịch quy tắc chặn quảng cáo Native của WebKit
         AdBlockRuleBuilder.compileContentRuleList { [weak self] ruleList in
@@ -293,18 +291,6 @@ final class MainViewController: UIViewController {
         btnMinimizePlayer.layer.cornerRadius = 18
         playerPanel.addSubview(btnMinimizePlayer)
 
-        // Nút Hẹn giờ tắt video ở góc trên bên phải video (cạnh nút CC & bánh răng ⚙ của YouTube)
-        btnSleepTimerQuick.setImage(UIImage(systemName: "timer"), for: .normal)
-        btnSleepTimerQuick.tintColor = .white
-        btnSleepTimerQuick.setTitleColor(.white, for: .normal)
-        btnSleepTimerQuick.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .bold)
-        btnSleepTimerQuick.backgroundColor = UIColor(white: 0.1, alpha: 0.78)
-        btnSleepTimerQuick.layer.cornerRadius = 16
-        btnSleepTimerQuick.layer.borderWidth = 1
-        btnSleepTimerQuick.layer.borderColor = UIColor.white.withAlphaComponent(0.25).cgColor
-        btnSleepTimerQuick.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
-        playerPanel.addSubview(btnSleepTimerQuick)
-
         // Vùng kéo mép trên video để vuốt xuống thu nhỏ
         playerDragArea.backgroundColor = .clear
         playerPanel.addSubview(playerDragArea)
@@ -403,10 +389,7 @@ final class MainViewController: UIViewController {
         }
 
         btnMinimizePlayer.frame = CGRect(x: 8, y: 6, width: 36, height: 36)
-        btnSleepTimerQuick.sizeToFit()
-        let timerW = max(36, btnSleepTimerQuick.bounds.width + 16)
-        btnSleepTimerQuick.frame = CGRect(x: safeFrame.width - 96 - timerW, y: 7, width: timerW, height: 32)
-        playerDragArea.frame = CGRect(x: 50, y: 0, width: max(40, safeFrame.width - 200), height: 44)
+        playerDragArea.frame = CGRect(x: 56, y: 0, width: max(40, safeFrame.width - 164), height: 44)
 
         miniPlayerBar.frame = CGRect(x: 0, y: 0, width: safeFrame.width, height: miniPlayerHeight)
         if let rightInfoBg = miniPlayerBar.viewWithTag(901) {
@@ -422,7 +405,6 @@ final class MainViewController: UIViewController {
 
     private func setupGestures() {
         btnMinimizePlayer.addTarget(self, action: #selector(onTapMinimize), for: .touchUpInside)
-        btnSleepTimerQuick.addTarget(self, action: #selector(onTapSleepTimerQuick), for: .touchUpInside)
         btnMiniPlayerPlayPause.addTarget(self, action: #selector(onTapMiniPlayPause), for: .touchUpInside)
         btnMiniPlayerClose.addTarget(self, action: #selector(onTapMiniClose), for: .touchUpInside)
 
@@ -446,10 +428,6 @@ final class MainViewController: UIViewController {
 
     @objc private func onTapExpand() {
         expandPlayer()
-    }
-
-    @objc private func onTapSleepTimerQuick() {
-        showSleepTimerPickerDialog()
     }
 
     @objc private func onTapMiniPlayPause() {
@@ -529,9 +507,7 @@ final class MainViewController: UIViewController {
 
         miniPlayerBar.isHidden = true
         btnMinimizePlayer.isHidden = false
-        btnSleepTimerQuick.isHidden = false
         playerDragArea.isHidden = false
-        updateQuickSleepTimerButton()
 
         let currentPlayerUrl = playerWebView.url?.absoluteString ?? ""
         if currentPlayerUrl.contains("youtube.com") {
@@ -562,7 +538,6 @@ final class MainViewController: UIViewController {
 
         miniPlayerBar.isHidden = false
         btnMinimizePlayer.isHidden = true
-        btnSleepTimerQuick.isHidden = true
         playerDragArea.isHidden = true
 
         let vW = max(1, fullW)
@@ -591,9 +566,7 @@ final class MainViewController: UIViewController {
         let safeFrame = view.safeAreaLayoutGuide.layoutFrame
         miniPlayerBar.isHidden = true
         btnMinimizePlayer.isHidden = false
-        btnSleepTimerQuick.isHidden = false
         playerDragArea.isHidden = false
-        updateQuickSleepTimerButton()
 
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
             self.playerPanel.frame = safeFrame
@@ -629,20 +602,6 @@ final class MainViewController: UIViewController {
     }
 
     // MARK: - Hẹn giờ tắt video tự động (Giống Cốc Cốc: Không / Khi hết video / Sau 15-90 phút)
-    private func updateQuickSleepTimerButton() {
-        let mode = AppSettings.shared.sleepTimerMode
-        if mode == AppSettings.sleepTimerOff {
-            btnSleepTimerQuick.setTitle(nil, for: .normal)
-            btnSleepTimerQuick.tintColor = .white
-        } else {
-            let label = (mode == AppSettings.sleepTimerEndOfVideo) ? " Hết video" : " \(mode)p"
-            btnSleepTimerQuick.setTitle(label, for: .normal)
-            let green = UIColor(red: 0.30, green: 0.69, blue: 0.31, alpha: 1.0)
-            btnSleepTimerQuick.tintColor = green
-            btnSleepTimerQuick.setTitleColor(green, for: .normal)
-        }
-        view.setNeedsLayout()
-    }
 
     func showSleepTimerPickerDialog(onUpdated: (() -> Void)? = nil) {
         let alert = UIAlertController(
@@ -672,8 +631,8 @@ final class MainViewController: UIViewController {
 
         alert.addAction(UIAlertAction(title: "Đóng", style: .cancel))
         if let popover = alert.popoverPresentationController {
-            popover.sourceView = btnSleepTimerQuick
-            popover.sourceRect = btnSleepTimerQuick.bounds
+            popover.sourceView = view
+            popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
         }
         present(alert, animated: true)
     }
@@ -698,7 +657,6 @@ final class MainViewController: UIViewController {
             showToast("Đã tắt hẹn giờ video")
         }
 
-        updateQuickSleepTimerButton()
         syncSettingsToWeb()
     }
 
@@ -707,7 +665,6 @@ final class MainViewController: UIViewController {
         sleepTimer = nil
         AppSettings.shared.sleepTimerMode = AppSettings.sleepTimerOff
         AppSettings.shared.sleepTimerTargetDate = nil
-        updateQuickSleepTimerButton()
         syncSettingsToWeb()
 
         isVideoPlaying = false
@@ -932,7 +889,6 @@ extension MainViewController: WKScriptMessageHandler, WKNavigationDelegate {
             showSettingsSheet()
         case "openSleepTimerDialog":
             showSleepTimerPickerDialog { [weak self] in
-                self?.updateQuickSleepTimerButton()
             }
         case "onVideoEnded":
             if AppSettings.shared.sleepTimerMode == AppSettings.sleepTimerEndOfVideo {
