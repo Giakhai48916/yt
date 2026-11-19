@@ -972,7 +972,7 @@ class MainActivity : AppCompatActivity() {
         val sleepLabel = JSONObject.quote(AppSettings.getSleepTimerLabel(remSec))
         val script = buildString {
             append("window.__braveSleepTimerLabel = $sleepLabel;")
-            append("var subEl = document.getElementById('__brave_sleep_timer_menu_sub'); if (subEl) subEl.textContent = $sleepLabel + ' ›';")
+            append("var topSvg = document.querySelector('#__brave_top_sleep_btn svg'); if (topSvg) topSvg.style.fill = (window.__braveSleepTimerLabel && window.__braveSleepTimerLabel !== 'Không') ? '#4caf50' : '#ffffff'; var subEl = document.getElementById('__brave_sleep_timer_menu_sub'); if (subEl) subEl.textContent = $sleepLabel + ' ›';")
             append("if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;")
         }
         webView.evaluateJavascript(script, null)

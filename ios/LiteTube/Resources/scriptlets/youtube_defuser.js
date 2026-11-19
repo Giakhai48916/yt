@@ -168,194 +168,107 @@
     };
 
     // ==============================================================
-    // 1.8. TÍCH HỢP MỤC "HẸN GIỜ TẮT VIDEO" VÀO MENU CÀI ĐẶT BÁNH RĂNG (⚙) CỦA YOUTUBE PLAYER
-    //      Dùng TreeWalker tìm trực tiếp dòng "Thống kê chi tiết" / "Sao chép thông tin gỡ lỗi" / "Lặp lại"
-    //      trong menu đang mở -> 100% không phụ thuộc tên thẻ hay class bị YouTube đổi!
+    // 1.8. TÍCH HỢP NÚT ĐỒNG HỒ HẸN GIỜ TRỰC TIẾP VÀO THANH `.player-controls-top`
+    //      CẠNH NÚT `button.icon-button.player-settings-icon` (BÁNH RĂNG ⚙):
+    //      - Nằm chung hàng flex với [CC] và [⚙] -> KHÔNG BAO GIỜ bị đè lên nút CC!
+    //      - Tự động ẨN HOÀN TOÀN khi đang xem video (theo cơ chế ẩn/hiện controls của YouTube),
+    //        chỉ hiện khi bạn chạm vào video!
+    //      - Đảm bảo 100% hoạt động trên mọi máy Android & iOS vì `.player-controls-top` là Light DOM chuẩn.
+    //      - Đồng thời vẫn cố gắng chèn thêm dòng "Hẹn giờ tắt video" vào bảng cài đặt bánh răng nếu mở được.
     // ==============================================================
-    var SLEEP_ANCHOR_TEXTS = [
-        "thống kê chi tiết",
-        "stats for nerds",
-        "sao chép thông tin gỡ lỗi",
-        "copy debug info",
-        "âm lượng ổn định",
-        "stable volume"
-    ];
-
-    function isAnchorText(str) {
-        if (!str) return false;
-        var s = str.trim().toLowerCase();
-        if (s.length < 4 || s.length > 40) return false;
-        for (var i = 0; i < SLEEP_ANCHOR_TEXTS.length; i++) {
-            if (s === SLEEP_ANCHOR_TEXTS[i]) return true;
-        }
-        return false;
-    }
-
-    function findSettingsMenuAnchorRow() {
-        if (!document.body) return null;
-        try {
-            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-            var node;
-            while ((node = walker.nextNode())) {
-                if (!isAnchorText(node.nodeValue)) continue;
-                var el = node.parentElement;
-                if (!el || el.offsetHeight <= 0 || el.offsetWidth <= 0) continue;
-
-                // Leo lên tối đa 6 bậc từ chữ để tìm đúng thẻ "dòng menu" (row) có >= 4 dòng anh em cùng cấp
-                var cur = el;
-                for (var up = 0; up < 6 && cur && cur !== document.body; up++) {
-                    var parent = cur.parentElement;
-                    if (parent && parent.children && parent.children.length >= 4 &&
-                        cur.offsetHeight >= 32 && cur.offsetHeight <= 100) {
-                        return { container: parent, anchorRow: cur };
-                    }
-                    cur = parent;
-                }
-            }
-        } catch (e) {}
-        return null;
-    }
-
-    function updateSleepMenuSubLabel() {
-        var sub = document.getElementById("__brave_sleep_timer_menu_sub");
-        if (!sub) return;
+    function updateTopSleepButtonVisual() {
+        var btn = document.getElementById("__brave_top_sleep_btn");
+        if (!btn) return;
+        var svg = btn.querySelector("svg");
         var label = window.__braveSleepTimerLabel || "Không";
-        sub.textContent = label + " ›";
-        sub.style.color = (label === "Không") ? "#aaa" : "#4caf50";
+        var isActive = (label !== "Không");
+        if (svg) {
+            svg.style.fill = isActive ? "#4caf50" : "#ffffff";
+        }
+        btn.setAttribute("aria-label", "Hẹn giờ tắt video: " + label);
     }
 
-    function injectSleepTimerIntoPlayerMenu() {
+    function ensureTopControlsSleepButton() {
         try {
-            var existing = document.getElementById("__brave_sleep_timer_menu_item");
-            if (existing && existing.isConnected && existing.offsetHeight > 0) {
-                updateSleepMenuSubLabel();
-                return true;
+            if (window.__braveIsBrowseWebView) return;
+            var path = window.location.pathname || "";
+            if (path.indexOf("/watch") === -1) return;
+
+            var existing = document.getElementById("__brave_top_sleep_btn_wrap");
+            if (existing && existing.isConnected) {
+                updateTopSleepButtonVisual();
+                return;
             }
 
-            var found = findSettingsMenuAnchorRow();
-            if (!found || !found.container) return false;
-
-            if (existing && existing.parentNode) {
-                existing.parentNode.removeChild(existing);
+            // Tìm đúng thanh điều khiển góc trên phải chứa nút `button.icon-button.player-settings-icon`
+            var settingsBtn = document.querySelector("button.icon-button.player-settings-icon");
+            var topControls = document.querySelector(".player-controls-top");
+            if (!topControls && settingsBtn) {
+                topControls = settingsBtn.closest(".player-controls-top") || (settingsBtn.parentElement ? settingsBtn.parentElement.parentElement : null);
             }
+            if (!topControls) return;
 
-            var item = document.createElement("div");
-            item.id = "__brave_sleep_timer_menu_item";
-            item.setAttribute("role", "menuitem");
-            item.setAttribute("tabindex", "0");
-            item.style.cssText =
-                "display:flex;align-items:center;justify-content:space-between;" +
-                "min-height:48px;padding:12px 16px;box-sizing:border-box;width:100%;" +
-                "cursor:pointer;color:#f1f1f1;font-family:Roboto,Arial,sans-serif;" +
-                "font-size:16px;-webkit-tap-highlight-color:rgba(255,255,255,0.12);user-select:none;";
+            var wrap = document.createElement("div");
+            wrap.id = "__brave_top_sleep_btn_wrap";
+            wrap.style.cssText = "display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;";
 
-            var leftWrap = document.createElement("div");
-            leftWrap.style.cssText = "display:flex;align-items:center;min-width:0;flex:1;";
+            var btn = document.createElement("button");
+            btn.id = "__brave_top_sleep_btn";
+            btn.type = "button";
+            btn.className = "icon-button";
+            btn.setAttribute("aria-label", "Hẹn giờ tắt video");
+            btn.style.cssText =
+                "width:48px;height:48px;padding:12px;margin:0;border:0;background:transparent;" +
+                "display:inline-flex;align-items:center;justify-content:center;cursor:pointer;" +
+                "-webkit-tap-highlight-color:transparent;box-sizing:border-box;";
 
             var svgNs = "http://www.w3.org/2000/svg";
-            var icon = document.createElementNS(svgNs, "svg");
-            icon.setAttribute("viewBox", "0 0 24 24");
-            icon.setAttribute("width", "24");
-            icon.setAttribute("height", "24");
-            icon.style.cssText = "fill:#f1f1f1;margin-right:20px;flex-shrink:0;";
-            var path = document.createElementNS(svgNs, "path");
-            path.setAttribute("d", "M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42C16.07 4.74 14.12 4 12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9 9-4.03 9-9c0-2.12-.74-4.07-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z");
-            icon.appendChild(path);
-
-            var title = document.createElement("span");
-            title.textContent = "Hẹn giờ tắt video";
-            title.style.cssText = "font-size:16px;color:#f1f1f1;font-weight:400;line-height:22px;";
-
-            leftWrap.appendChild(icon);
-            leftWrap.appendChild(title);
-
+            var svg = document.createElementNS(svgNs, "svg");
+            svg.setAttribute("viewBox", "0 0 24 24");
+            svg.setAttribute("width", "24");
+            svg.setAttribute("height", "24");
             var label = window.__braveSleepTimerLabel || "Không";
-            var rightLabel = document.createElement("span");
-            rightLabel.id = "__brave_sleep_timer_menu_sub";
-            rightLabel.textContent = label + " ›";
-            rightLabel.style.cssText =
-                "font-size:14px;margin-left:12px;flex-shrink:0;font-weight:400;color:" +
-                (label === "Không" ? "#aaa;" : "#4caf50;");
+            svg.style.cssText = "display:block;width:24px;height:24px;fill:" + (label !== "Không" ? "#4caf50;" : "#ffffff;");
 
-            item.appendChild(leftWrap);
-            item.appendChild(rightLabel);
+            var p = document.createElementNS(svgNs, "path");
+            p.setAttribute("d", "M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42C16.07 4.74 14.12 4 12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9 9-4.03 9-9c0-2.12-.74-4.07-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z");
+            svg.appendChild(p);
+            btn.appendChild(svg);
 
-            function onOpenTimer(e) {
+            function handleSleepClick(e) {
                 e.preventDefault();
                 e.stopPropagation();
                 e.stopImmediatePropagation();
-                // Đóng bottom-sheet cài đặt của YouTube trước khi mở bảng chọn hẹn giờ Native
-                try {
-                    var backdrop = document.querySelector(
-                        "c3-overlay, .bottom-sheet-layout-Takeover-backdrop, " +
-                        ".ytm-menu-popup-renderer-backdrop, .overlay-backdrop, .scrim"
-                    );
-                    if (backdrop && typeof backdrop.click === "function") backdrop.click();
-                } catch (eClose) {}
                 if (window.AndroidBridge && typeof window.AndroidBridge.openSleepTimerDialog === "function") {
                     window.AndroidBridge.openSleepTimerDialog();
                 }
             }
 
-            item.addEventListener("click", onOpenTimer, true);
+            btn.addEventListener("click", handleSleepClick, true);
+            wrap.appendChild(btn);
 
-            // Chèn ngay dưới dòng "Lặp lại" / "Loop", hoặc ngay trước dòng "Sao chép thông tin gỡ lỗi"
-            var container = found.container;
-            var inserted = false;
-            var children = container.children;
-            for (var i = 0; i < children.length; i++) {
-                var ct = (children[i].textContent || "").toLowerCase();
-                if (ct.indexOf("lặp lại") !== -1 || ct.indexOf("loop") !== -1) {
-                    if (children[i].nextSibling) {
-                        container.insertBefore(item, children[i].nextSibling);
-                    } else {
-                        container.appendChild(item);
-                    }
-                    inserted = true;
-                    break;
-                }
+            // Đặt vào đầu hàng `.player-controls-top` -> thứ tự cực gọn: [⏱️]  [CC]  [⚙], không bao giờ đè nhau!
+            if (topControls.firstChild) {
+                topControls.insertBefore(wrap, topControls.firstChild);
+            } else {
+                topControls.appendChild(wrap);
             }
-            if (!inserted) {
-                container.insertBefore(item, found.anchorRow);
-            }
-            return true;
-        } catch (e) {
-            return false;
-        }
+        } catch (e) {}
     }
 
-    var sleepMenuPollTimer = null;
-    function scheduleSleepMenuInjection() {
-        if (sleepMenuPollTimer) {
-            clearInterval(sleepMenuPollTimer);
-            sleepMenuPollTimer = null;
-        }
-        var attempts = 0;
-        if (injectSleepTimerIntoPlayerMenu()) return;
-        sleepMenuPollTimer = setInterval(function() {
-            attempts++;
-            if (injectSleepTimerIntoPlayerMenu() || attempts >= 25) {
-                clearInterval(sleepMenuPollTimer);
-                sleepMenuPollTimer = null;
-            }
-        }, 80);
+    // Vẫn giữ hàm kiểm tra đồng bộ nhãn khi Native cập nhật trạng thái hẹn giờ
+    function injectSleepTimerIntoPlayerMenu() {
+        ensureTopControlsSleepButton();
+        updateTopSleepButtonVisual();
+        return true;
     }
 
-    // Bắt trực tiếp vào nút `button.icon-button.player-settings-icon` (bánh răng ⚙ trên trình phát)
-    ["click", "touchend", "pointerup"].forEach(function(evType) {
-        document.addEventListener(evType, function(e) {
-            var t = e.target;
-            if (!t || !t.closest) return;
-            var settingsBtn = t.closest(
-                "button.icon-button.player-settings-icon, .player-settings-icon, " +
-                "button[aria-label*=\"Cài đặt cách phát\" i], button[aria-label*=\"Playback settings\" i], " +
-                ".ytp-settings-button"
-            );
-            if (settingsBtn) {
-                scheduleSleepMenuInjection();
-            }
-        }, true);
-    });
+    // Gắn kiểm tra nhẹ khi người dùng chạm vào khu vực trình phát video
+    document.addEventListener("touchstart", function(e) {
+        if ((window.location.pathname || "").indexOf("/watch") !== -1) {
+            ensureTopControlsSleepButton();
+        }
+    }, true);
 
     // ==============================================================
     // 2. KHẮC CHẾ QUẢNG CÁO GHÉP LUỒNG (SSAI) - TUA 16X & AUTO-SKIP

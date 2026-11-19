@@ -738,7 +738,7 @@ final class MainViewController: UIViewController {
         let label = AppSettings.shared.getSleepTimerLabel().replacingOccurrences(of: "'", with: "\\'")
         let script = """
         window.__braveSleepTimerLabel = '\(label)';
-        var subEl = document.getElementById('__brave_sleep_timer_menu_sub');
+        var topSvg = document.querySelector('#__brave_top_sleep_btn svg'); if (topSvg) topSvg.style.fill = (window.__braveSleepTimerLabel && window.__braveSleepTimerLabel !== 'Không') ? '#4caf50' : '#ffffff'; var subEl = document.getElementById('__brave_sleep_timer_menu_sub');
         if (subEl) subEl.textContent = '\(label) ›';
         if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings(\(json));
         else window.__braveSettings = \(json);
