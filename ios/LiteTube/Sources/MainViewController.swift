@@ -3,8 +3,8 @@ import WebKit
 import AVFoundation
 import MediaPlayer
 
-/// MainViewController cho LiteTube iOS:
-/// Tái hiện 100% kiến trúc 2 Tầng View (Browse WebView + Sliding Player Layer + MiniPlayer Bar),
+/// MainViewController cho LiteTube iOS (hỗ trợ đầy đủ iPhone & iPad màn hình dọc/ngang):
+/// Kiến trúc 2 Tầng View (Browse WebView + Sliding Player Layer + MiniPlayer Bar),
 /// Nút Hẹn Giờ Tắt Video góc phải, Brave Shields (AdBlock + SSAI 16x), Background Audio & LockScreen Media Controls.
 final class MainViewController: UIViewController {
 
@@ -52,8 +52,6 @@ final class MainViewController: UIViewController {
     private var compiledAdBlockRuleList: WKContentRuleList?
 
     // MARK: - Cầu nối tương thích `window.AndroidBridge` trên iOS WKWebView
-    /// Chuyển đổi toàn bộ lời gọi `window.AndroidBridge.*` của các scriptlet sang `window.webkit.messageHandlers.iosBridge.postMessage(...)`
-    /// giúp dùng chung 100% logic của `youtube_defuser.js` và `pip_controller.js` giữa Android và iOS!
     private static let iosBridgePolyfillJs: String = """
     (function() {
         if (window.AndroidBridge) return;
@@ -108,6 +106,7 @@ final class MainViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.06, green: 0.06, blue: 0.06, alpha: 1.0)
+        view.clipsToBounds = true
 
         setupWebViews()
         setupUI()
@@ -150,7 +149,14 @@ final class MainViewController: UIViewController {
             forMainFrameOnly: false
         ))
 
-        // 2. Nếu là Browse WebView: tiêm interceptor chặn /watch và khóa phát tự động trên trang chủ
+        // 2. Tiêm CSS chống tràn màn hình ngang trên iPad / màn hình rộng
+        controller.addUserScript(WKUserScript(
+            source: Self.ipadResponsiveCssJs,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
+        // 3. Nếu là Browse WebView: tiêm interceptor chặn /watch và khóa phát tự động trên trang chủ
         if isBrowseMode {
             controller.addUserScript(WKUserScript(
                 source: Self.browseWatchInterceptorJs,
@@ -165,7 +171,7 @@ final class MainViewController: UIViewController {
             ))
         }
 
-        // 3. Tiêm pip_controller.js và youtube_defuser.js từ Bundle Resources
+        // 4. Tiêm pip_controller.js và youtube_defuser.js từ Bundle Resources
         if let pipJs = loadBundledText(name: "pip_controller", ext: "js", subdir: "scriptlets") {
             controller.addUserScript(WKUserScript(
                 source: pipJs,
@@ -181,7 +187,7 @@ final class MainViewController: UIViewController {
             ))
         }
 
-        // 4. Tiêm Cosmetic CSS ẩn banner quảng cáo & nút "Mở bằng ứng dụng"
+        // 5. Tiêm Cosmetic CSS ẩn banner quảng cáo & nút "Mở bằng ứng dụng"
         if let cssText = loadBundledText(name: "cosmetic_rules", ext: "css", subdir: "filters") {
             let b64 = Data(cssText.utf8).base64EncodedString()
             let injectCss = """
@@ -208,7 +214,7 @@ final class MainViewController: UIViewController {
             ))
         }
 
-        // 5. Tiêm mục "Cài đặt LiteTube" vào trang select_site
+        // 6. Tiêm mục "Cài đặt LiteTube" vào trang select_site
         controller.addUserScript(WKUserScript(
             source: Self.selectSiteSettingsScriptletJs,
             injectionTime: .atDocumentEnd,
@@ -232,19 +238,27 @@ final class MainViewController: UIViewController {
     }
 
     private func setupWebViews() {
-        let mobileSafariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        let customUA = isPad
+            ? "Mozilla/5.0 (iPad; CPU OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+            : "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
 
         browseWebView = WKWebView(frame: .zero, configuration: makeWebViewConfiguration(isBrowseMode: true))
-        browseWebView.customUserAgent = mobileSafariUA
+        browseWebView.customUserAgent = customUA
         browseWebView.navigationDelegate = self
         browseWebView.allowsBackForwardNavigationGestures = true
         browseWebView.scrollView.backgroundColor = .black
+        browseWebView.scrollView.contentInsetAdjustmentBehavior = .never
+        browseWebView.scrollView.bounces = true
+        browseWebView.clipsToBounds = true
         browseWebView.isOpaque = false
 
         playerWebView = WKWebView(frame: .zero, configuration: makeWebViewConfiguration(isBrowseMode: false))
-        playerWebView.customUserAgent = mobileSafariUA
+        playerWebView.customUserAgent = customUA
         playerWebView.navigationDelegate = self
         playerWebView.scrollView.backgroundColor = .black
+        playerWebView.scrollView.contentInsetAdjustmentBehavior = .never
+        playerWebView.clipsToBounds = true
         playerWebView.isOpaque = false
     }
 
@@ -255,8 +269,8 @@ final class MainViewController: UIViewController {
         browseWebView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             browseWebView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            browseWebView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            browseWebView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            browseWebView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            browseWebView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             browseWebView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
         ])
 
@@ -266,6 +280,7 @@ final class MainViewController: UIViewController {
 
         // 2. Tầng trên: Sliding Video Player Panel
         playerPanel.backgroundColor = .black
+        playerPanel.clipsToBounds = true
         playerPanel.isHidden = true
         view.addSubview(playerPanel)
 
@@ -296,6 +311,7 @@ final class MainViewController: UIViewController {
 
         // Thanh MiniPlayer Bar khi thu nhỏ ở đáy màn hình
         miniPlayerBar.backgroundColor = .clear
+        miniPlayerBar.clipsToBounds = true
         miniPlayerBar.isHidden = true
         playerPanel.addSubview(miniPlayerBar)
 
@@ -332,19 +348,58 @@ final class MainViewController: UIViewController {
         progressBar.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             progressBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            progressBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            progressBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            progressBar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             progressBar.heightAnchor.constraint(equalToConstant: 2.5)
         ])
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        layoutPlayerForCurrentBounds()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            self?.layoutPlayerForCurrentBounds()
+        }) { [weak self] _ in
+            guard let self = self else { return }
+            self.layoutPlayerForCurrentBounds()
+            let resizeJs = "try { window.dispatchEvent(new Event('resize')); } catch(e) {}"
+            self.browseWebView.evaluateJavaScript(resizeJs, completionHandler: nil)
+            self.playerWebView.evaluateJavaScript(resizeJs, completionHandler: nil)
+        }
+    }
+
+    private func layoutPlayerForCurrentBounds() {
         let safeFrame = view.safeAreaLayoutGuide.layoutFrame
+        guard safeFrame.width > 0, safeFrame.height > 0 else { return }
+
         if panelState == .expanded || panelState == .hidden {
             playerPanel.frame = safeFrame
             playerWebView.transform = .identity
+            playerWebView.layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
             playerWebView.frame = playerPanel.bounds
+        } else if panelState == .collapsed {
+            let fullW = safeFrame.width
+            let fullH = safeFrame.height
+            let targetY = safeFrame.minY + max(0, fullH - bottomNavHeight - miniPlayerHeight)
+            playerPanel.frame = CGRect(x: safeFrame.minX, y: targetY, width: fullW, height: miniPlayerHeight)
+
+            let vW = max(1, fullW)
+            let vH = min(vW * 9.0 / 16.0, fullH * 0.62)
+            let boxW: CGFloat = 104.0
+            let boxH: CGFloat = 58.0
+            let scale = min(boxW / vW, boxH / vH)
+            let tx: CGFloat = 4.0 + (boxW - vW * scale) / 2.0
+            let ty: CGFloat = (miniPlayerHeight - vH * scale) / 2.0
+
+            playerWebView.transform = .identity
+            playerWebView.layer.anchorPoint = CGPoint(x: 0, y: 0)
+            playerWebView.layer.position = .zero
+            playerWebView.bounds = CGRect(x: 0, y: 0, width: fullW, height: fullH)
+            playerWebView.transform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
         }
 
         btnMinimizePlayer.frame = CGRect(x: 8, y: 6, width: 36, height: 36)
@@ -356,7 +411,7 @@ final class MainViewController: UIViewController {
         miniPlayerBar.frame = CGRect(x: 0, y: 0, width: safeFrame.width, height: miniPlayerHeight)
         if let rightInfoBg = miniPlayerBar.viewWithTag(901) {
             let videoBoxW: CGFloat = 114
-            rightInfoBg.frame = CGRect(x: videoBoxW, y: 0, width: safeFrame.width - videoBoxW, height: miniPlayerHeight)
+            rightInfoBg.frame = CGRect(x: videoBoxW, y: 0, width: max(0, safeFrame.width - videoBoxW), height: miniPlayerHeight)
             let rw = rightInfoBg.bounds.width
             btnMiniPlayerClose.frame = CGRect(x: rw - 44, y: 10, width: 40, height: 44)
             btnMiniPlayerPlayPause.frame = CGRect(x: rw - 88, y: 10, width: 40, height: 44)
@@ -455,21 +510,16 @@ final class MainViewController: UIViewController {
             return
         }
 
-        // Tắt mọi âm thanh/video trên Browse WebView trước khi mở Player Layer
         browseWebView.evaluateJavaScript(
             "(function(){try{var vids=document.querySelectorAll('video');for(var i=0;i<vids.length;i++){vids[i].muted=true;(window.__braveNativePause||vids[i].pause).call(vids[i]);}}catch(e){}})()",
             completionHandler: nil
         )
 
         panelState = .expanded
-        let safeFrame = view.safeAreaLayoutGuide.layoutFrame
         playerPanel.transform = .identity
-        playerPanel.frame = safeFrame
         playerPanel.backgroundColor = .black
         playerPanel.isHidden = false
-
-        playerWebView.transform = .identity
-        playerWebView.frame = playerPanel.bounds
+        layoutPlayerForCurrentBounds()
 
         currentVideoId = newVid
         currentTitle = "LiteTube"
@@ -515,19 +565,17 @@ final class MainViewController: UIViewController {
         btnSleepTimerQuick.isHidden = true
         playerDragArea.isHidden = true
 
-        // Giữ nguyên kích thước playerWebView = fullFrame để YouTube không phát hiện kích thước nhỏ
-        playerWebView.frame = CGRect(x: 0, y: 0, width: fullW, height: fullH)
         let vW = max(1, fullW)
-        let vH = vW * 9.0 / 16.0
+        let vH = min(vW * 9.0 / 16.0, fullH * 0.62)
         let boxW: CGFloat = 104.0
         let boxH: CGFloat = 58.0
         let scale = min(boxW / vW, boxH / vH)
         let tx: CGFloat = 4.0 + (boxW - vW * scale) / 2.0
         let ty: CGFloat = (miniPlayerHeight - vH * scale) / 2.0
 
-        // Thu nhỏ từ góc trên-trái (anchorPoint = 0,0) khớp 100% với pivotX=0, pivotY=0 bên Android
         playerWebView.layer.anchorPoint = CGPoint(x: 0, y: 0)
         playerWebView.layer.position = .zero
+        playerWebView.bounds = CGRect(x: 0, y: 0, width: fullW, height: fullH)
 
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
             self.playerPanel.frame = CGRect(x: safeFrame.minX, y: targetY, width: fullW, height: self.miniPlayerHeight)
@@ -553,8 +601,7 @@ final class MainViewController: UIViewController {
             self.playerWebView.transform = .identity
         } completion: { [weak self] _ in
             guard let self = self, self.panelState == .expanded else { return }
-            self.playerWebView.layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            self.playerWebView.frame = self.playerPanel.bounds
+            self.layoutPlayerForCurrentBounds()
             self.runPipCommand("resync")
         }
     }
@@ -570,9 +617,7 @@ final class MainViewController: UIViewController {
         }) { [weak self] _ in
             guard let self = self, self.panelState == .hidden else { return }
             self.playerPanel.isHidden = true
-            self.playerWebView.transform = .identity
-            self.playerWebView.layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            self.playerWebView.frame = self.playerPanel.bounds
+            self.layoutPlayerForCurrentBounds()
             self.playerWebView.evaluateJavaScript(
                 "(function(){try{if(window.__bravePip)window.__bravePip.pause();var v=document.querySelector('video');if(v){v.pause();v.removeAttribute('src');v.load();}}catch(e){}})()",
                 completionHandler: nil
@@ -753,7 +798,7 @@ final class MainViewController: UIViewController {
         )
     }
 
-    // MARK: - Điều khiển từ Màn hình khóa, Control Center & Tai nghe AirPods (MPNowPlayingInfoCenter)
+    // MARK: - Điều khiển từ Màn hình khóa, Control Center & Tai nghe AirPods
     private func setupRemoteTransportControls() {
         let commandCenter = MPRemoteCommandCenter.shared()
 
@@ -944,8 +989,74 @@ extension MainViewController: WKScriptMessageHandler, WKNavigationDelegate {
     }
 }
 
-// MARK: - Embedded Scriptlets cho Browse & Player UI
+// MARK: - Embedded Scriptlets cho Browse, Player UI & iPad Landscape Fix
 extension MainViewController {
+
+    /// CSS chống tràn màn hình ngang trên iPad (Portrait & Landscape):
+    /// - Khóa `overflow-x: hidden` và `max-width: 100vw` toàn trang.
+    /// - Khi màn hình ngang trên iPad (`min-width: 700px`): giới hạn chiều cao khung video tối đa 62vh
+    ///   và giữ tỉ lệ `object-fit: contain` để không bao giờ bị tràn khung hình ảnh hay mất tiêu đề bên dưới.
+    /// - Thu gọn thẻ video trên Trang chủ iPad theo dạng lưới gọn gàng, không phóng đại vỡ hình.
+    static let ipadResponsiveCssJs: String = """
+    (function() {
+        try {
+            var styleId = '__brave_ipad_responsive_style';
+            if (document.getElementById(styleId)) return;
+            var css = [
+                'html, body {',
+                '  max-width: 100vw !important;',
+                '  overflow-x: hidden !important;',
+                '  box-sizing: border-box !important;',
+                '}',
+                'img, .video-thumbnail-img, .ytm-thumbnail-cover, ytm-thumbnail-cover {',
+                '  max-width: 100% !important;',
+                '  box-sizing: border-box !important;',
+                '}',
+                '@media (min-width: 700px) {',
+                '  html:not([data-brave-pip-mode]) #player-container-id,',
+                '  html:not([data-brave-pip-mode]) .player-container.sticky-player,',
+                '  html:not([data-brave-pip-mode]) .player-size,',
+                '  html:not([data-brave-pip-mode]) #movie_player,',
+                '  html:not([data-brave-pip-mode]) .html5-video-player {',
+                '    max-width: 100vw !important;',
+                '    max-height: 62vh !important;',
+                '    background: #000 !important;',
+                '    overflow: hidden !important;',
+                '  }',
+                '  html:not([data-brave-pip-mode]) #movie_player video,',
+                '  html:not([data-brave-pip-mode]) .html5-video-player video {',
+                '    width: 100% !important;',
+                '    height: 100% !important;',
+                '    max-height: 62vh !important;',
+                '    left: 0 !important;',
+                '    top: 0 !important;',
+                '    object-fit: contain !important;',
+                '  }',
+                '  ytm-rich-grid-renderer, ytm-section-list-renderer {',
+                '    max-width: 100vw !important;',
+                '    overflow-x: hidden !important;',
+                '  }',
+                '  ytm-rich-item-renderer .video-thumbnail-container-large,',
+                '  ytm-video-with-context-renderer .video-thumbnail-container-large {',
+                '    max-height: 46vh !important;',
+                '    overflow: hidden !important;',
+                '  }',
+                '  ytm-rich-item-renderer .video-thumbnail-img,',
+                '  ytm-video-with-context-renderer .video-thumbnail-img {',
+                '    object-fit: cover !important;',
+                '    width: 100% !important;',
+                '    height: 100% !important;',
+                '  }',
+                '}'
+            ].join('\\n');
+            var style = document.createElement('style');
+            style.id = styleId;
+            style.type = 'text/css';
+            style.textContent = css;
+            (document.head || document.documentElement).appendChild(style);
+        } catch(e) {}
+    })();
+    """
 
     static let injectPlayerUiCssJs: String = """
     (function() {
