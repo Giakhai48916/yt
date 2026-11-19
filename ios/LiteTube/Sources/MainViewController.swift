@@ -389,7 +389,7 @@ final class MainViewController: UIViewController {
         }
 
         btnMinimizePlayer.frame = CGRect(x: 8, y: 6, width: 36, height: 36)
-        playerDragArea.frame = CGRect(x: 56, y: 0, width: max(40, safeFrame.width - 164), height: 44)
+        playerDragArea.frame = CGRect(x: 56, y: 0, width: max(40, safeFrame.width - 220), height: 44)
 
         miniPlayerBar.frame = CGRect(x: 0, y: 0, width: safeFrame.width, height: miniPlayerHeight)
         if let rightInfoBg = miniPlayerBar.viewWithTag(901) {
