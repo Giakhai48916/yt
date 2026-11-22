@@ -5,6 +5,8 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
+import android.app.UiModeManager
+import android.view.KeyEvent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -64,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         private const val ACTION_PIP_PAUSE = "com.brave.youtubelite.PIP_PAUSE"
         private const val ACTION_PIP_HEADPHONES = "com.brave.youtubelite.PIP_HEADPHONES"
         private const val TAG = "MainActivity"
+        private const val TV_USER_AGENT = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.5 TV Safari/537.36"
     }
 
     enum class PanelState {
@@ -112,6 +115,8 @@ class MainActivity : AppCompatActivity() {
     private var lastMediaServiceVideoId: String = ""
 
     private var isPlayerPrewarmed = false
+    private var isTvDevice = false
+    private var lastTvBackPressMs = 0L
     private var wasInPipMode = false
     private var isInPipLayout = false
     private var isHidingPipToAudio = false
@@ -182,22 +187,181 @@ class MainActivity : AppCompatActivity() {
             ""
         }
 
+        isTvDevice = detectAndroidTv()
         initViews()
-        setupBrowseWebView()
-        setupPlayerWebView()
-        setupPlayerGestures()
         setupBackPressedHandler()
 
-        val targetUrl = intent?.dataString ?: "https://m.youtube.com"
-        if (targetUrl.contains("/watch") && !targetUrl.contains("/shorts/")) {
-            webView.loadUrl("https://m.youtube.com")
-            openVideoPlayer(targetUrl)
+        if (isTvDevice) {
+            setupTvMode()
         } else {
-            webView.loadUrl(targetUrl)
-            // Pre-warm nhẹ playerWebView bằng trang tĩnh select_site (KHÔNG video feed)
-            // để nạp sẵn JS Polymer mà tuyệt đối không phát ra bất kỳ luồng âm thanh ngầm nào!
-            prewarmPlayerWebViewIfNeeded()
+            setupBrowseWebView()
+            setupPlayerWebView()
+            setupPlayerGestures()
+
+            val targetUrl = intent?.dataString ?: "https://m.youtube.com"
+            if (targetUrl.contains("/watch") && !targetUrl.contains("/shorts/")) {
+                webView.loadUrl("https://m.youtube.com")
+                openVideoPlayer(targetUrl)
+            } else {
+                webView.loadUrl(targetUrl)
+                prewarmPlayerWebViewIfNeeded()
+            }
         }
+    }
+
+    private fun detectAndroidTv(): Boolean {
+        val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+        val isTvUiMode = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+        val hasLeanback = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        val noTouchscreen = !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+        return isTvUiMode || hasLeanback || noTouchscreen
+    }
+
+    /**
+     * CHẾ ĐỘ ANDROID TV SIÊU NHẸ (Tương thích mọi TV TCL, Sony, Xiaomi, Android Box):
+     * - Chỉ chạy DUY NHẤT 1 WebView (tắt hoàn toàn playerWebView thứ 2 để tiết kiệm ~50% RAM cho TV 1.5-2GB RAM).
+     * - Tải giao diện chuẩn YouTube TV (https://www.youtube.com/tv) hỗ trợ điều khiển Remote Lên/Xuống/Trái/Phải/OK mượt mà.
+     * - Khóa toàn màn hình ngang, giữ màn hình sáng khi xem video và vẫn chạy đầy đủ chặn quảng cáo + hẹn giờ tắt video.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupTvMode() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        swipeRefreshLayout.isEnabled = false
+        playerPanel.visibility = View.GONE
+        playerWebView.onPause()
+
+        configureWebSettings(webView)
+        webView.settings.userAgentString = TV_USER_AGENT
+        webView.settings.useWideViewPort = true
+        webView.settings.loadWithOverviewMode = true
+        webView.addJavascriptInterface(MediaBridge(fromPlayer = false), "AndroidBridge")
+
+        val tvClient = AppWebViewClient(applicationContext, isBrowseMode = false)
+        tvClient.installDocumentStartScripts(webView)
+        webView.webViewClient = tvClient
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (newProgress < 100) {
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.progress = newProgress
+                } else {
+                    progressBar.visibility = View.GONE
+                }
+            }
+        }
+
+        webView.requestFocus()
+        val incoming = intent?.dataString
+        val tvUrl = if (!incoming.isNullOrBlank() && incoming.contains("youtube.com")) {
+            val vid = extractVideoIdFromUrl(incoming)
+            if (vid.isNotEmpty()) "https://www.youtube.com/tv#/watch?v=$vid" else "https://www.youtube.com/tv"
+        } else {
+            "https://www.youtube.com/tv"
+        }
+        webView.loadUrl(tvUrl)
+    }
+
+    /**
+     * Menu nhanh dành cho Remote TV (nhấn nút Menu / Settings / Info trên điều khiển TCL / Sony):
+     * Hoàn toàn điều khiển được bằng phím mũi tên Lên/Xuống và nút OK trên Remote.
+     */
+    private fun showTvQuickMenu() {
+        val adLabel = if (AppSettings.isAdBlockEnabled(this)) "Đang BẬT" else "Đang TẮT"
+        val sleepLabel = AppSettings.getSleepTimerLabel()
+        val items = arrayOf(
+            "⏱️ Hẹn giờ tắt video ($sleepLabel)",
+            "🛡️ Chặn quảng cáo & Tua 16x ($adLabel)",
+            "🔄 Tải lại ứng dụng",
+            "🧹 Xóa bộ nhớ đệm (tăng tốc TV)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Cài đặt LiteTube TV")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> showSleepTimerPickerDialog()
+                    1 -> {
+                        val next = !AppSettings.isAdBlockEnabled(this)
+                        AppSettings.setAdBlockEnabled(this, next)
+                        AdBlockEngine.isEnabled = next
+                        syncSettingsToWeb()
+                        Toast.makeText(this, if (next) "Đã BẬT chặn quảng cáo" else "Đã TẮT chặn quảng cáo", Toast.LENGTH_SHORT).show()
+                    }
+                    2 -> webView.reload()
+                    3 -> {
+                        WebResourceCacheManager.clearCache(this)
+                        AppSettings.clearAppCache(this)
+                        webView.clearCache(true)
+                        Toast.makeText(this, "Đã xóa sạch bộ nhớ đệm", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("Đóng", null)
+            .show()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!isTvDevice) return super.dispatchKeyEvent(event)
+
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MENU,
+                KeyEvent.KEYCODE_SETTINGS,
+                KeyEvent.KEYCODE_INFO,
+                KeyEvent.KEYCODE_BOOKMARK -> {
+                    showTvQuickMenu()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    runPipCommand("toggle")
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                    runPipCommand("play")
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    runPipCommand("pause")
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    webView.evaluateJavascript("window.__braveTvSeekBy && window.__braveTvSeekBy(10);", null)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    webView.evaluateJavascript("window.__braveTvSeekBy && window.__braveTvSeekBy(-10);", null)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                    runPipCommand("next")
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                    runPipCommand("previous")
+                    return true
+                }
+            }
+        }
+
+        // Chuyển phím OK (DPAD_CENTER) trên điều khiển TV TCL/Sony thành ENTER để YouTube TV nhận 100%
+        if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+            val enterEvent = KeyEvent(
+                event.downTime,
+                event.eventTime,
+                event.action,
+                KeyEvent.KEYCODE_ENTER,
+                event.repeatCount,
+                event.metaState,
+                event.deviceId,
+                event.scanCode,
+                event.flags,
+                event.source
+            )
+            return super.dispatchKeyEvent(enterEvent)
+        }
+
+        return super.dispatchKeyEvent(event)
     }
 
     private fun initViews() {
@@ -778,6 +942,17 @@ class MainActivity : AppCompatActivity() {
 
                 if (panelState == PanelState.COLLAPSED) {
                     closePlayer()
+                    return
+                }
+
+                if (isTvDevice) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastTvBackPressMs < 1500L) {
+                        finish()
+                    } else {
+                        lastTvBackPressMs = now
+                        webView.evaluateJavascript("window.__braveTvSendBack && window.__braveTvSendBack();", null)
+                    }
                     return
                 }
 

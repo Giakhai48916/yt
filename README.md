@@ -95,6 +95,18 @@ Do chính sách của Apple không cho phép cài thẳng file `.ipa` từ trìn
 
 ---
 
+### 📺 3. Dành Cho Android TV / Google TV (Sony, TCL, Xiaomi, Android Box) qua USB
+File **`app-debug.apk`** đã tích hợp sẵn **Chế độ TV Mode (1 WebView siêu nhẹ)** và **Banner Android TV** (tự động hiện trên màn hình chính TV):
+1. Tải gói **`LiteTube-Debug-APK`** từ tab **Actions** trên GitHub, giải nén lấy file **`app-debug.apk`** và chép vào USB.
+2. Cắm USB vào TV Sony / TCL $\rightarrow$ mở trình quản lý tệp (**X-plore** hoặc **File Commander** tải từ CH Play trên TV) $\rightarrow$ bấm vào `app-debug.apk` để cài đặt.
+3. **Điều khiển bằng Remote TV TCL / Sony:**
+   * **Phím mũi tên (Lên/Xuống/Trái/Phải) + OK:** Di chuyển và chọn video y hệt YouTube TV gốc.
+   * **Phím Back:** Quay lại bước trước trong YouTube TV *(nhấn Back 2 lần liên tiếp để thoát ứng dụng)*.
+   * **Phím Menu / Cài đặt (Settings) / Info trên Remote:** Mở menu nhanh **LiteTube TV** để chỉnh **Hẹn giờ tắt video**, bật/tắt **Chặn quảng cáo**, hoặc **Xóa bộ nhớ đệm**.
+   * **Phím Media (Play/Pause, Tua nhanh/Lùi):** Tạm dừng, phát tiếp hoặc tua nhanh ±10 giây trực tiếp.
+
+---
+
 ## 🏗️ Kiến Trúc Kỹ Thuật (Architecture Overview)
 
 ```

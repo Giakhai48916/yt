@@ -86,6 +86,7 @@ object WebResourceCacheManager {
     // Danh sách host tĩnh được phép cache
     private val ALLOWED_HOSTS = setOf(
         "m.youtube.com",
+                "www.youtube.com",
         "www.youtube.com",
         "youtube.com",
         "s.ytimg.com",
@@ -100,6 +101,7 @@ object WebResourceCacheManager {
         "/s/player/",
         "/s/desktop/",
         "/s/mobile/",
+        "/s/tv/",
         "/yts/jsbin/",
         "/yts/cssbin/"
     )

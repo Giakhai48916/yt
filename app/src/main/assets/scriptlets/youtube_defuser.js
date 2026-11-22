@@ -642,7 +642,7 @@
         if (!window.AndroidBridge) return;
 
         const path = window.location.pathname || '';
-        if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1) {
+        if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1 && path.indexOf('/tv') === -1) {
             return;
         }
 
@@ -714,7 +714,7 @@
 
     setInterval(function() {
         const path = window.location.pathname || '';
-        if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1) return;
+        if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1 && path.indexOf('/tv') === -1) return;
         checkAndDefuseAds();
         if (Date.now() < autoUnmuteWindowUntil && !userMutedVideo) {
             tryAutoUnmute();
@@ -722,4 +722,36 @@
     }, 300);
 
     setInterval(syncNativeState, 1000);
+
+    // ==============================================================
+    // 6. HỖ TRỢ ĐIỀU KHIỂN REMOTE ANDROID TV (TCL, SONY, XIAOMI...)
+    // ==============================================================
+    window.__braveTvSeekBy = function(deltaSec) {
+        try {
+            var v = pickMainVideo();
+            if (!v || !isFinite(v.currentTime)) return "tv:no-video";
+            var nextT = Math.max(0, v.currentTime + Number(deltaSec || 0));
+            if (isFinite(v.duration) && v.duration > 0) nextT = Math.min(nextT, v.duration);
+            v.currentTime = nextT;
+            return "tv:seek:" + Math.round(nextT);
+        } catch (e) { return "tv:err"; }
+    };
+
+    window.__braveTvSendBack = function() {
+        try {
+            var target = document.activeElement || document.body || document;
+            ["keydown", "keyup"].forEach(function(t) {
+                var ev = new KeyboardEvent(t, {
+                    key: "Escape",
+                    code: "Escape",
+                    keyCode: 27,
+                    which: 27,
+                    bubbles: true,
+                    cancelable: true
+                });
+                target.dispatchEvent(ev);
+            });
+            return "tv:esc";
+        } catch (e) { return "tv:err"; }
+    };
 })();

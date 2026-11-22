@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <!-- Nền tối chuẩn Android TV -->
+    <path
+        android:fillColor="#FF0F0F0F"
+        android:pathData="M0,0h320v180h-320z" />
+    <!-- Viền đỏ tinh tế dưới đáy -->
+    <path
+        android:fillColor="#FFFF0000"
+        android:pathData="M0,174h320v6h-320z" />
+    <!-- Biểu tượng LiteTube bo góc đỏ chính giữa -->
+    <path
+        android:fillColor="#FFFF0000"
+        android:pathData="M116,56 C116,47 123,40 132,40 L188,40 C197,40 204,47 204,56 L204,124 C204,133 197,140 188,140 L132,140 C123,140 116,133 116,124 Z" />
+    <!-- Tam giác Play trắng -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M148,68 L182,90 L148,112 Z" />
+</vector>
