@@ -1,6 +1,8 @@
 package com.brave.youtubelite.network
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.graphics.Bitmap
 import android.util.Base64
 import android.util.Log
@@ -413,7 +415,8 @@ open class AppWebViewClient(
     fun installDocumentStartScripts(webView: WebView) {
         try {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                val origins = setOf("*")
+                // BẢO MẬT TÀI KHOẢN: Chỉ tiêm scriptlet trên đúng tên miền YouTube, TUYỆT ĐỐI KHÔNG tiêm vào accounts.google.com
+                val origins = setOf("https://m.youtube.com", "https://www.youtube.com", "https://youtube.com")
                 // Quan trọng: Chạy browseWatchInterceptorJs TRƯỚC youtube_defuser.js để gắn cờ __braveIsBrowseWebView
                 if (isBrowseMode && browseWatchInterceptorJs.isNotEmpty()) {
                     WebViewCompat.addDocumentStartJavaScript(webView, browseWatchInterceptorJs, origins)
@@ -446,12 +449,53 @@ open class AppWebViewClient(
         }
     }
 
+    private fun isYouTubeOrigin(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return try {
+            val host = Uri.parse(url).host?.lowercase() ?: return false
+            host == "m.youtube.com" || host == "www.youtube.com" || host == "youtube.com" || host == "music.youtube.com"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun isTrustedAuthOrYouTubeUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        if (url == "about:blank") return true
+        return try {
+            val uri = Uri.parse(url)
+            if (!uri.scheme.equals("https", ignoreCase = true)) return false
+            val host = uri.host?.lowercase() ?: return false
+            host == "youtube.com" || host.endsWith(".youtube.com") ||
+                host == "youtu.be" ||
+                host == "accounts.google.com" || host == "myaccount.google.com" ||
+                host == "accounts.youtube.com" || host == "consent.youtube.com" ||
+                host == "consent.google.com" || host == "g.co" ||
+                host == "www.google.com" || host.endsWith(".google.com") ||
+                host.endsWith(".gstatic.com") || host.endsWith(".googleapis.com")
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     override fun shouldOverrideUrlLoading(
         view: WebView?,
         request: WebResourceRequest?
     ): Boolean {
         val url = request?.url?.toString() ?: ""
         if (onInterceptWatchUrl?.invoke(url) == true) {
+            return true
+        }
+        // BẢO MẬT TÀI KHOẢN: Link lạ bên thứ 3 (mô tả video, phishing...) không được chạy trong WebView chứa cookie Google
+        if (url.isNotEmpty() && !isTrustedAuthOrYouTubeUrl(url)) {
+            if (url.startsWith("https://") || url.startsWith("http://")) {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (_: Exception) {}
+            }
             return true
         }
         return super.shouldOverrideUrlLoading(view, request)
@@ -485,16 +529,16 @@ open class AppWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        if (!documentStartInstalled) {
+        if (!documentStartInstalled && isYouTubeOrigin(url)) {
             injectFullShields(view)
         }
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
-        if (!documentStartInstalled) {
+        if (!documentStartInstalled && isYouTubeOrigin(url)) {
             injectFullShields(view)
-        } else {
+        } else if (isYouTubeOrigin(url)) {
             syncLightweightState(view, url)
         }
         onPageFinishedCallback?.invoke(url)
@@ -511,7 +555,9 @@ open class AppWebViewClient(
             onInterceptWatchUrl?.invoke(url)
             return
         }
-        syncLightweightState(view, url)
+        if (isYouTubeOrigin(url)) {
+            syncLightweightState(view, url)
+        }
     }
 
     private fun syncLightweightState(webView: WebView?, url: String?) {

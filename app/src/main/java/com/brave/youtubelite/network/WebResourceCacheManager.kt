@@ -208,7 +208,12 @@ object WebResourceCacheManager {
             url.contains("/youtubei/v1/") ||
             url.contains("/api/") ||
             url.contains("/ptracking") ||
-            url.contains("/generate_204")
+            url.contains("/generate_204") ||
+            url.contains("accounts.google.com") ||
+            url.contains("myaccount.google.com") ||
+            url.contains("ServiceLogin") ||
+            url.contains("/oauth") ||
+            url.contains("/signin")
         ) {
             return false
         }

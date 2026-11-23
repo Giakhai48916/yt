@@ -31,6 +31,8 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
+import android.webkit.WebStorage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -117,6 +119,7 @@ class MainActivity : AppCompatActivity() {
     private var isPlayerPrewarmed = false
     private var isTvDevice = false
     private var lastTvBackPressMs = 0L
+    private var tvBackPressCount = 0
     private var wasInPipMode = false
     private var isInPipLayout = false
     private var isHidingPipToAudio = false
@@ -155,6 +158,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // BẢO MẬT TÀI KHOẢN: Tắt gỡ lỗi từ xa WebView để ngăn đọc trộm cookie đăng nhập Google qua USB/ADB
+        WebView.setWebContentsDebuggingEnabled(false)
 
         AdBlockEngine.isEnabled = AppSettings.isAdBlockEnabled(this)
         WebResourceCacheManager.isEnabled = AppSettings.isPreloadCacheEnabled(this)
@@ -274,7 +280,8 @@ class MainActivity : AppCompatActivity() {
             "⏱️ Hẹn giờ tắt video ($sleepLabel)",
             "🛡️ Chặn quảng cáo & Tua 16x ($adLabel)",
             "🔄 Tải lại ứng dụng",
-            "🧹 Xóa bộ nhớ đệm (tăng tốc TV)"
+            "🧹 Xóa bộ nhớ đệm (tăng tốc TV)",
+            "🔒 Đăng xuất & Xóa sạch phiên Google"
         )
         AlertDialog.Builder(this)
             .setTitle("Cài đặt LiteTube TV")
@@ -294,6 +301,15 @@ class MainActivity : AppCompatActivity() {
                         AppSettings.clearAppCache(this)
                         webView.clearCache(true)
                         Toast.makeText(this, "Đã xóa sạch bộ nhớ đệm", Toast.LENGTH_SHORT).show()
+                    }
+                    4 -> {
+                        CookieManager.getInstance().removeAllCookies {
+                            CookieManager.getInstance().flush()
+                        }
+                        WebStorage.getInstance().deleteAllData()
+                        webView.clearCache(true)
+                        webView.loadUrl("https://www.youtube.com/tv")
+                        Toast.makeText(this, "Đã đăng xuất & xóa sạch cookie tài khoản", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -420,6 +436,16 @@ class MainActivity : AppCompatActivity() {
             databaseEnabled = true
             allowFileAccess = false
             allowContentAccess = false
+            @Suppress("DEPRECATION")
+            allowFileAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            allowUniversalAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            saveFormData = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                safeBrowsingEnabled = true
+            }
 
             setCacheMode(WebSettings.LOAD_DEFAULT)
             mediaPlaybackRequiresUserGesture = false
@@ -947,11 +973,22 @@ class MainActivity : AppCompatActivity() {
 
                 if (isTvDevice) {
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastTvBackPressMs < 1500L) {
+                    if (now - lastTvBackPressMs <= 1600L) {
+                        tvBackPressCount++
+                    } else {
+                        tvBackPressCount = 1
+                    }
+                    lastTvBackPressMs = now
+
+                    if (tvBackPressCount >= 3) {
+                        tvBackPressCount = 0
                         finish()
                     } else {
-                        lastTvBackPressMs = now
+                        // Lần 1 (ẩn thanh điều khiển) & Lần 2 (thoát khỏi video về danh sách) đều gửi Escape vào YouTube TV
                         webView.evaluateJavascript("window.__braveTvSendBack && window.__braveTvSendBack();", null)
+                        if (tvBackPressCount == 2) {
+                            Toast.makeText(this@MainActivity, "Bấm Back thêm 1 lần nữa để thoát LiteTube", Toast.LENGTH_SHORT).show()
+                        }
                     }
                     return
                 }

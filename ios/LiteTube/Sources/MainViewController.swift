@@ -937,6 +937,38 @@ extension MainViewController: WKScriptMessageHandler, WKNavigationDelegate {
         }
     }
 
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+        let scheme = (url.scheme ?? "").lowercased()
+        if scheme == "about" {
+            decisionHandler(.allow)
+            return
+        }
+        guard scheme == "https", let host = url.host?.lowercased() else {
+            decisionHandler(.cancel)
+            return
+        }
+        let trusted = host == "youtube.com" || host.hasSuffix(".youtube.com") ||
+            host == "youtu.be" ||
+            host == "accounts.google.com" || host == "myaccount.google.com" ||
+            host == "consent.google.com" || host == "g.co" ||
+            host == "www.google.com" || host.hasSuffix(".google.com") ||
+            host.hasSuffix(".gstatic.com") || host.hasSuffix(".googleapis.com")
+        if !trusted && navigationAction.targetFrame?.isMainFrame == true {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if webView === browseWebView {
             refreshControl.endRefreshing()
