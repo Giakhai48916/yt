@@ -737,6 +737,59 @@
         } catch (e) { return "tv:err"; }
     };
 
+    
+    window.__braveTvSearch = function(query) {
+        try {
+            var q = String(query || "").trim();
+            if (!q) return "tv:empty";
+
+            // 1. Điều hướng thẳng tới route tìm kiếm chuẩn của YouTube TV (#/search?q=...)
+            var targetHash = "#/search?q=" + encodeURIComponent(q);
+            window.location.hash = targetHash;
+            try { window.dispatchEvent(new HashChangeEvent("hashchange")); } catch (eH) {}
+
+            // 2. Sau khi khung tìm kiếm mở ra, điền trực tiếp từ khóa vào ô <input> của YouTube TV
+            //    và kích hoạt sự kiện input + Enter để YouTube TV tải danh sách bài hát ngay lập tức!
+            var attempts = 0;
+            var fillTimer = setInterval(function() {
+                attempts++;
+                try {
+                    var input = document.querySelector("input[type=\"text\"], input[type=\"search\"], input");
+                    if (input) {
+                        var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                        if (nativeSetter) {
+                            nativeSetter.call(input, q);
+                        } else {
+                            input.value = q;
+                        }
+                        input.focus();
+                        input.dispatchEvent(new Event("input", { bubbles: true }));
+                        input.dispatchEvent(new Event("change", { bubbles: true }));
+                        ["keydown", "keyup"].forEach(function(t) {
+                            input.dispatchEvent(new KeyboardEvent(t, {
+                                key: "Enter",
+                                code: "Enter",
+                                keyCode: 13,
+                                which: 13,
+                                bubbles: true,
+                                cancelable: true
+                            }));
+                        });
+                        clearInterval(fillTimer);
+                        return;
+                    }
+                } catch (eIn) {}
+                if (attempts >= 15) {
+                    clearInterval(fillTimer);
+                }
+            }, 150);
+
+            return "tv:search:ok";
+        } catch (e) {
+            return "tv:search:err";
+        }
+    };
+
     window.__braveTvSendBack = function() {
         try {
             var target = document.activeElement || document.body || document;

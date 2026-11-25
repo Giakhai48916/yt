@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
+import android.app.SearchManager
 import android.app.UiModeManager
 import android.view.KeyEvent
 import android.content.BroadcastReceiver
@@ -233,6 +234,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun extractAssistantSearchQuery(intent: Intent?): String? {
+        if (intent == null) return null
+        val q = intent.getStringExtra(SearchManager.QUERY)
+            ?: intent.getStringExtra("query")
+            ?: intent.getStringExtra(Intent.EXTRA_TEXT)
+        return q?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val voiceQuery = extractAssistantSearchQuery(intent)
+        if (voiceQuery != null) {
+            executeVoiceSearchQuery(voiceQuery)
+            return
+        }
+        val url = intent.dataString
+        if (!url.isNullOrBlank() && url.contains("youtube.com")) {
+            if (isTvDevice) {
+                val vid = extractVideoIdFromUrl(url)
+                if (vid.isNotEmpty()) {
+                    webView.loadUrl("https://www.youtube.com/tv#/watch?v=$vid")
+                } else {
+                    webView.loadUrl("https://www.youtube.com/tv")
+                }
+            } else if (url.contains("/watch") && !url.contains("/shorts/")) {
+                openVideoPlayer(url)
+            } else {
+                webView.loadUrl(url)
+            }
+        }
+    }
+
     /**
      * Mở trình nhận diện giọng nói Tiếng Việt (dùng micro của Remote TV TCL/Sony hoặc điện thoại).
      * Kết quả tìm kiếm sẽ mở thẳng bên trong LiteTube, tuyệt đối không bị kéo sang ứng dụng YouTube gốc!
@@ -276,7 +310,14 @@ class MainActivity : AppCompatActivity() {
         }
         Toast.makeText(this, "Đang tìm: $query", Toast.LENGTH_SHORT).show()
         if (isTvDevice) {
-            webView.loadUrl("https://www.youtube.com/tv#/results?search_query=$encoded")
+            val safeQuery = JSONObject.quote(query)
+            webView.evaluateJavascript(
+                "(function(){ return (window.__braveTvSearch && window.__braveTvSearch($safeQuery)) ? 'ok' : 'fallback'; })()"
+            ) { res ->
+                if (res == null || !res.contains("ok")) {
+                    webView.loadUrl("https://www.youtube.com/tv#/search?q=$encoded")
+                }
+            }
         } else {
             if (panelState == PanelState.EXPANDED) {
                 collapsePlayer()
@@ -362,8 +403,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.requestFocus()
+        val assistantQuery = extractAssistantSearchQuery(intent)
         val incoming = intent?.dataString
-        val tvUrl = if (!incoming.isNullOrBlank() && incoming.contains("youtube.com")) {
+        val tvUrl = if (!assistantQuery.isNullOrBlank()) {
+            val enc = try { URLEncoder.encode(assistantQuery, "UTF-8") } catch (_: Exception) { Uri.encode(assistantQuery) }
+            "https://www.youtube.com/tv#/search?q=$enc"
+        } else if (!incoming.isNullOrBlank() && incoming.contains("youtube.com")) {
             val vid = extractVideoIdFromUrl(incoming)
             if (vid.isNotEmpty()) "https://www.youtube.com/tv#/watch?v=$vid" else "https://www.youtube.com/tv"
         } else {
@@ -430,14 +475,14 @@ class MainActivity : AppCompatActivity() {
                 KeyEvent.KEYCODE_SEARCH,
                 KeyEvent.KEYCODE_VOICE_ASSIST,
                 KeyEvent.KEYCODE_ASSIST,
+                KeyEvent.KEYCODE_BOOKMARK,
                 KeyEvent.KEYCODE_PROG_RED -> {
                     startVoiceSearch()
                     return true
                 }
                 KeyEvent.KEYCODE_MENU,
                 KeyEvent.KEYCODE_SETTINGS,
-                KeyEvent.KEYCODE_INFO,
-                KeyEvent.KEYCODE_BOOKMARK -> {
+                KeyEvent.KEYCODE_INFO -> {
                     showTvQuickMenu()
                     return true
                 }
