@@ -34,6 +34,10 @@ import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import android.webkit.JavascriptInterface
+import android.speech.RecognizerIntent
+import android.webkit.PermissionRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import java.net.URLEncoder
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -68,6 +72,7 @@ class MainActivity : AppCompatActivity() {
         private const val ACTION_PIP_PAUSE = "com.brave.youtubelite.PIP_PAUSE"
         private const val ACTION_PIP_HEADPHONES = "com.brave.youtubelite.PIP_HEADPHONES"
         private const val TAG = "MainActivity"
+        private const val REQ_RECORD_AUDIO = 102
         private const val TV_USER_AGENT = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.5 TV Safari/537.36"
     }
 
@@ -120,6 +125,19 @@ class MainActivity : AppCompatActivity() {
     private var isTvDevice = false
     private var lastTvBackPressMs = 0L
     private var tvBackPressCount = 0
+
+    // Bộ thu âm tìm kiếm bằng giọng nói Tiếng Việt (hoạt động trực tiếp bên trong LiteTube, không bị nhảy sang YouTube gốc)
+    private val voiceSearchLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val spokenText = matches?.firstOrNull()?.trim()
+            if (!spokenText.isNullOrEmpty()) {
+                executeVoiceSearchQuery(spokenText)
+            }
+        }
+    }
     private var wasInPipMode = false
     private var isInPipLayout = false
     private var isHidingPipToAudio = false
@@ -215,6 +233,87 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Mở trình nhận diện giọng nói Tiếng Việt (dùng micro của Remote TV TCL/Sony hoặc điện thoại).
+     * Kết quả tìm kiếm sẽ mở thẳng bên trong LiteTube, tuyệt đối không bị kéo sang ứng dụng YouTube gốc!
+     */
+    fun startVoiceSearch() {
+        runOnUiThread {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.RECORD_AUDIO),
+                    REQ_RECORD_AUDIO
+                )
+                return@runOnUiThread
+            }
+
+            try {
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "vi-VN")
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói tên bài hát hoặc video muốn tìm...")
+                }
+                voiceSearchLauncher.launch(intent)
+            } catch (_: Exception) {
+                Toast.makeText(
+                    this,
+                    "Thiết bị chưa bật dịch vụ nhận diện giọng nói Google",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun executeVoiceSearchQuery(query: String) {
+        val encoded = try {
+            URLEncoder.encode(query, "UTF-8")
+        } catch (_: Exception) {
+            Uri.encode(query)
+        }
+        Toast.makeText(this, "Đang tìm: $query", Toast.LENGTH_SHORT).show()
+        if (isTvDevice) {
+            webView.loadUrl("https://www.youtube.com/tv#/results?search_query=$encoded")
+        } else {
+            if (panelState == PanelState.EXPANDED) {
+                collapsePlayer()
+            }
+            webView.loadUrl("https://m.youtube.com/results?search_query=$encoded")
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_RECORD_AUDIO &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            startVoiceSearch()
+        }
+    }
+
+    private fun handleWebAudioPermission(request: PermissionRequest?) {
+        request ?: return
+        val wantsAudio = request.resources.any { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
+        if (wantsAudio && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+        } else if (wantsAudio) {
+            request.deny()
+            startVoiceSearch()
+        } else {
+            request.deny()
+        }
+    }
+
     private fun detectAndroidTv(): Boolean {
         val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
         val isTvUiMode = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
@@ -256,6 +355,10 @@ class MainActivity : AppCompatActivity() {
                     progressBar.visibility = View.GONE
                 }
             }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                runOnUiThread { handleWebAudioPermission(request) }
+            }
         }
 
         webView.requestFocus()
@@ -277,6 +380,7 @@ class MainActivity : AppCompatActivity() {
         val adLabel = if (AppSettings.isAdBlockEnabled(this)) "Đang BẬT" else "Đang TẮT"
         val sleepLabel = AppSettings.getSleepTimerLabel()
         val items = arrayOf(
+            "🎤 Tìm kiếm bằng giọng nói (Tiếng Việt)",
             "⏱️ Hẹn giờ tắt video ($sleepLabel)",
             "🛡️ Chặn quảng cáo & Tua 16x ($adLabel)",
             "🔄 Tải lại ứng dụng",
@@ -284,25 +388,26 @@ class MainActivity : AppCompatActivity() {
             "🔒 Đăng xuất & Xóa sạch phiên Google"
         )
         AlertDialog.Builder(this)
-            .setTitle("Cài đặt LiteTube TV")
+            .setTitle("LiteTube TV")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> showSleepTimerPickerDialog()
-                    1 -> {
+                    0 -> startVoiceSearch()
+                    1 -> showSleepTimerPickerDialog()
+                    2 -> {
                         val next = !AppSettings.isAdBlockEnabled(this)
                         AppSettings.setAdBlockEnabled(this, next)
                         AdBlockEngine.isEnabled = next
                         syncSettingsToWeb()
                         Toast.makeText(this, if (next) "Đã BẬT chặn quảng cáo" else "Đã TẮT chặn quảng cáo", Toast.LENGTH_SHORT).show()
                     }
-                    2 -> webView.reload()
-                    3 -> {
+                    3 -> webView.reload()
+                    4 -> {
                         WebResourceCacheManager.clearCache(this)
                         AppSettings.clearAppCache(this)
                         webView.clearCache(true)
                         Toast.makeText(this, "Đã xóa sạch bộ nhớ đệm", Toast.LENGTH_SHORT).show()
                     }
-                    4 -> {
+                    5 -> {
                         CookieManager.getInstance().removeAllCookies {
                             CookieManager.getInstance().flush()
                         }
@@ -322,6 +427,13 @@ class MainActivity : AppCompatActivity() {
 
         if (event.action == KeyEvent.ACTION_DOWN) {
             when (event.keyCode) {
+                KeyEvent.KEYCODE_SEARCH,
+                KeyEvent.KEYCODE_VOICE_ASSIST,
+                KeyEvent.KEYCODE_ASSIST,
+                KeyEvent.KEYCODE_PROG_RED -> {
+                    startVoiceSearch()
+                    return true
+                }
                 KeyEvent.KEYCODE_MENU,
                 KeyEvent.KEYCODE_SETTINGS,
                 KeyEvent.KEYCODE_INFO,
@@ -490,6 +602,10 @@ class MainActivity : AppCompatActivity() {
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
                 }
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                runOnUiThread { handleWebAudioPermission(request) }
             }
         }
     }
@@ -1753,6 +1869,11 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 showSettingsDialog()
             }
+        }
+
+        @JavascriptInterface
+        fun startVoiceSearch() {
+            this@MainActivity.startVoiceSearch()
         }
 
         @JavascriptInterface

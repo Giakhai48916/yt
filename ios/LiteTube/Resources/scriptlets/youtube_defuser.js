@@ -754,4 +754,44 @@
             return "tv:esc";
         } catch (e) { return "tv:err"; }
     };
+
+    // Bắt nút Micro 🎤 trên thanh tìm kiếm của YouTube TV & YouTube Mobile để dùng thu âm Tiếng Việt Native
+    function bindVoiceSearchInterception() {
+        if (window.__braveVoiceHooked) return;
+        window.__braveVoiceHooked = true;
+
+        function isVoiceButton(el) {
+            if (!el || !el.closest) return false;
+            return !!el.closest(
+                "ytm-voice-search-button, #voice-search-button, .voice-search-button, " +
+                "button[aria-label*=\"giọng nói\" i], button[aria-label*=\"voice\" i], " +
+                "[role=\"button\"][aria-label*=\"giọng nói\" i], [role=\"button\"][aria-label*=\"voice\" i], " +
+                "ytlr-voice-search-button, .ytlr-search-box__voice-button"
+            );
+        }
+
+        document.addEventListener("click", function(e) {
+            if (isVoiceButton(e.target)) {
+                if (window.AndroidBridge && typeof window.AndroidBridge.startVoiceSearch === "function") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    window.AndroidBridge.startVoiceSearch();
+                }
+            }
+        }, true);
+
+        // Hỗ trợ nhấn OK (Enter) trên Remote TV khi đang focus vào nút Micro của YouTube TV
+        document.addEventListener("keydown", function(e) {
+            if ((e.key === "Enter" || e.keyCode === 13) && isVoiceButton(document.activeElement)) {
+                if (window.AndroidBridge && typeof window.AndroidBridge.startVoiceSearch === "function") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    window.AndroidBridge.startVoiceSearch();
+                }
+            }
+        }, true);
+    }
+    bindVoiceSearchInterception();
 })();
