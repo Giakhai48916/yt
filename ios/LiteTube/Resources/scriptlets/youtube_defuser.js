@@ -642,7 +642,14 @@
         if (!window.AndroidBridge) return;
 
         const path = window.location.pathname || '';
-        if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1 && path.indexOf('/tv') === -1) {
+        if (path.indexOf('/tv') !== -1) {
+            if (isStopAtVideoEndEnabled()) {
+                const tvVid = pickMainVideo();
+                if (tvVid) handleCheckVideoEnd(tvVid);
+            }
+            return;
+        }
+        if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1) {
             return;
         }
 
@@ -743,46 +750,40 @@
             var q = String(query || "").trim();
             if (!q) return "tv:empty";
 
-            // 1. Điều hướng thẳng tới route tìm kiếm chuẩn của YouTube TV (#/search?q=...)
+            // 1. Dừng ngay thẻ <video> đang chạy (nếu có) để giải phóng 100% bộ giải mã phần cứng của TV
+            try {
+                var oldVideos = document.querySelectorAll("video");
+                for (var i = 0; i < oldVideos.length; i++) {
+                    if (!oldVideos[i].paused) {
+                        window.__braveAllowPauseUntil = Date.now() + 800;
+                        (window.__braveNativePause || oldVideos[i].pause).call(oldVideos[i]);
+                    }
+                }
+            } catch (eStop) {}
+
+            // 2. Điều hướng 1 lần duy nhất tới route tìm kiếm chuẩn của YouTube TV (#/search?q=...)
             var targetHash = "#/search?q=" + encodeURIComponent(q);
             window.location.hash = targetHash;
-            try { window.dispatchEvent(new HashChangeEvent("hashchange")); } catch (eH) {}
 
-            // 2. Sau khi khung tìm kiếm mở ra, điền trực tiếp từ khóa vào ô <input> của YouTube TV
-            //    và kích hoạt sự kiện input + Enter để YouTube TV tải danh sách bài hát ngay lập tức!
-            var attempts = 0;
-            var fillTimer = setInterval(function() {
-                attempts++;
+            // 3. Nếu ô tìm kiếm chưa tự nhận từ khóa sau 300ms thì mới điền 1 lần và lập tức blur() để đóng bàn phím ảo
+            setTimeout(function() {
                 try {
                     var input = document.querySelector("input[type=\"text\"], input[type=\"search\"], input");
                     if (input) {
-                        var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                        if (nativeSetter) {
-                            nativeSetter.call(input, q);
-                        } else {
-                            input.value = q;
+                        if ((input.value || "").trim().toLowerCase() !== q.toLowerCase()) {
+                            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                            if (nativeSetter) {
+                                nativeSetter.call(input, q);
+                            } else {
+                                input.value = q;
+                            }
+                            input.dispatchEvent(new Event("input", { bubbles: true }));
+                            input.dispatchEvent(new Event("change", { bubbles: true }));
                         }
-                        input.focus();
-                        input.dispatchEvent(new Event("input", { bubbles: true }));
-                        input.dispatchEvent(new Event("change", { bubbles: true }));
-                        ["keydown", "keyup"].forEach(function(t) {
-                            input.dispatchEvent(new KeyboardEvent(t, {
-                                key: "Enter",
-                                code: "Enter",
-                                keyCode: 13,
-                                which: 13,
-                                bubbles: true,
-                                cancelable: true
-                            }));
-                        });
-                        clearInterval(fillTimer);
-                        return;
+                        input.blur();
                     }
                 } catch (eIn) {}
-                if (attempts >= 15) {
-                    clearInterval(fillTimer);
-                }
-            }, 150);
+            }, 300);
 
             return "tv:search:ok";
         } catch (e) {

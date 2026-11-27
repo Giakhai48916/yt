@@ -8,6 +8,7 @@ import android.app.RemoteAction
 import android.app.SearchManager
 import android.app.UiModeManager
 import android.view.KeyEvent
+import android.view.inputmethod.InputMethodManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -126,16 +127,23 @@ class MainActivity : AppCompatActivity() {
     private var isTvDevice = false
     private var lastTvBackPressMs = 0L
     private var tvBackPressCount = 0
+    private var isLaunchingVoiceSearch = false
 
     // Bộ thu âm tìm kiếm bằng giọng nói Tiếng Việt (hoạt động trực tiếp bên trong LiteTube, không bị nhảy sang YouTube gốc)
     private val voiceSearchLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        isLaunchingVoiceSearch = false
         if (result.resultCode == RESULT_OK) {
             val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             val spokenText = matches?.firstOrNull()?.trim()
             if (!spokenText.isNullOrEmpty()) {
-                executeVoiceSearchQuery(spokenText)
+                // Đóng bàn phím ảo (nếu có) và chờ 150ms cho TV nhả hoàn toàn phiên thu âm micro
+                // trước khi mở kết quả tìm kiếm để bộ giải mã video/âm thanh không bị khựng
+                hideSoftKeyboard()
+                pipHandler.postDelayed({
+                    executeVoiceSearchQuery(spokenText)
+                }, 150)
             }
         }
     }
@@ -291,6 +299,7 @@ class MainActivity : AppCompatActivity() {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "vi-VN")
                     putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói tên bài hát hoặc video muốn tìm...")
                 }
+                isLaunchingVoiceSearch = true
                 voiceSearchLauncher.launch(intent)
             } catch (_: Exception) {
                 Toast.makeText(
@@ -300,6 +309,16 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
         }
+    }
+
+    private fun hideSoftKeyboard() {
+        try {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            val token = currentFocus?.windowToken ?: webView.windowToken
+            if (token != null) {
+                imm?.hideSoftInputFromWindow(token, 0)
+            }
+        } catch (_: Exception) {}
     }
 
     private fun executeVoiceSearchQuery(query: String) {
@@ -1704,6 +1723,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        isLaunchingVoiceSearch = false
+        if (isTvDevice) {
+            webView.onResume()
+            webView.requestFocus()
+            return
+        }
         if (!isInPipModeCompat()) {
             wasInPipMode = false
             isHidingPipToAudio = false
@@ -1742,6 +1767,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (isTvDevice || isLaunchingVoiceSearch) {
+            return
+        }
         if (isInPipModeCompat()) {
             runPipCommand("setBackground(true)")
             if (isVideoPlaying && AppSettings.isBackgroundPlayEnabled(this)) {
@@ -1869,6 +1897,7 @@ class MainActivity : AppCompatActivity() {
     ) {
         val playingChanged = playing != isVideoPlaying
         isVideoPlaying = playing
+        if (isTvDevice) return
 
         val cleanVid = videoId.trim()
         if (cleanVid.isNotEmpty() && cleanVid != currentVideoId) {
