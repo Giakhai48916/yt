@@ -128,6 +128,7 @@ class MainActivity : AppCompatActivity() {
     private var lastTvBackPressMs = 0L
     private var tvBackPressCount = 0
     private var isLaunchingVoiceSearch = false
+    private var isPlayerDestroyed = false
 
     // Bộ thu âm tìm kiếm bằng giọng nói Tiếng Việt (hoạt động trực tiếp bên trong LiteTube, không bị nhảy sang YouTube gốc)
     private val voiceSearchLauncher = registerForActivityResult(
@@ -394,7 +395,15 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         swipeRefreshLayout.isEnabled = false
         playerPanel.visibility = View.GONE
-        playerWebView.onPause()
+        // Hủy hẳn WebView thứ 2 trên TV để giải phóng RAM và GPU Surface cho luồng giải mã video/audio mượt 100%
+        if (!isPlayerDestroyed) {
+            isPlayerDestroyed = true
+            try {
+                playerWebView.onPause()
+                (playerPanel.parent as? ViewGroup)?.removeView(playerPanel)
+                if (!isPlayerDestroyed) playerWebView.destroy()
+            } catch (_: Exception) {}
+        }
 
         configureWebSettings(webView)
         webView.settings.userAgentString = TV_USER_AGENT
@@ -1368,7 +1377,7 @@ class MainActivity : AppCompatActivity() {
             append("if (window.__bravePip && window.__bravePip.applySettings) window.__bravePip.applySettings($settingsJson); else window.__braveSettings = $settingsJson;")
         }
         webView.evaluateJavascript(script, null)
-        playerWebView.evaluateJavascript(script, null)
+        if (!isPlayerDestroyed) playerWebView.evaluateJavascript(script, null)
     }
 
     private fun clampedPipAspectRatio(): Rational {
@@ -1883,7 +1892,7 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {}
         stopMediaService()
         webView.destroy()
-        playerWebView.destroy()
+        if (!isPlayerDestroyed) playerWebView.destroy()
         super.onDestroy()
     }
 

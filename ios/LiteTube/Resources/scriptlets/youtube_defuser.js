@@ -86,27 +86,32 @@
 
     if (window.fetch) {
         const originalFetch = window.fetch;
-        window.fetch = async function(...args) {
-            const response = await originalFetch.apply(this, args);
-            if (!isAdblockEnabled()) return response;
-
-            const url = args[0] ? (typeof args[0] === 'string' ? args[0] : args[0].url) : '';
-
-            if (url && url.indexOf('/youtubei/v1/player') !== -1) {
+        window.fetch = function() {
+            const args = arguments;
+            if (!isAdblockEnabled()) {
+                return originalFetch.apply(this, args);
+            }
+            const first = args[0];
+            const url = first ? (typeof first === 'string' ? first : (first.url || '')) : '';
+            // Fast-path: Mọi luồng chunk video/audio (googlevideo.com) đi thẳng qua fetch gốc,
+            // tuyệt đối không bọc async/Promise để tránh GC pause gây vấp đĩa trên TV!
+            if (!url || url.indexOf('/youtubei/v1/player') === -1) {
+                return originalFetch.apply(this, args);
+            }
+            return originalFetch.apply(this, args).then(function(response) {
                 try {
-                    const clone = response.clone();
-                    const json = await clone.json();
-                    const sanitized = sanitizePlayerObj(json);
-                    return new Response(JSON.stringify(sanitized), {
-                        status: response.status,
-                        statusText: response.statusText,
-                        headers: response.headers
-                    });
+                    return response.clone().json().then(function(json) {
+                        const sanitized = sanitizePlayerObj(json);
+                        return new Response(JSON.stringify(sanitized), {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: response.headers
+                        });
+                    }).catch(function() { return response; });
                 } catch (e) {
                     return response;
                 }
-            }
-            return response;
+            });
         };
     }
 
@@ -723,10 +728,10 @@
         const path = window.location.pathname || '';
         if (path.indexOf('/watch') === -1 && path.indexOf('/shorts') === -1 && path.indexOf('/tv') === -1) return;
         checkAndDefuseAds();
-        if (Date.now() < autoUnmuteWindowUntil && !userMutedVideo) {
+        if (path.indexOf('/tv') === -1 && Date.now() < autoUnmuteWindowUntil && !userMutedVideo) {
             tryAutoUnmute();
         }
-    }, 300);
+    }, 500);
 
     setInterval(syncNativeState, 1000);
 

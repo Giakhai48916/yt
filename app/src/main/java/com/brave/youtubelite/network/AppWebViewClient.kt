@@ -513,7 +513,14 @@ open class AppWebViewClient(
         view: WebView?,
         request: WebResourceRequest?
     ): WebResourceResponse? {
-        val url = request?.url.toString()
+        // FAST-PATH 0ms: Cho luồng stream video/audio (googlevideo.com) đi thẳng không qua bộ lọc
+        // để tránh tạo chuỗi URL dài & GC pause gây vấp tiếng 1 tích tắc trên Android TV
+        val host = request?.url?.host
+        if (host != null && host.endsWith("googlevideo.com", ignoreCase = true) && !host.startsWith("video-ad-stats", ignoreCase = true)) {
+            return null
+        }
+
+        val url = request?.url?.toString() ?: return null
 
         if (AdBlockEngine.isBlocked(url)) {
             return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
